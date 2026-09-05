@@ -1,0 +1,19 @@
+[project]
+name = "agent-engineer"
+version = "0.1.0"
+description = "Frozen typed schemas for the automated-agent-engineer build."
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.7,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent_engineer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
