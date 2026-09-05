@@ -263,9 +263,10 @@ class AgentSpec(_Frozen):
             f"memory: {', '.join(memory_bits)}",
             "tools:",
         ]
-        lines.extend(f"  - {name}" for name in self.tools) if self.tools else lines.append(
-            "  (none)"
-        )
+        if self.tools:
+            lines.extend(f"  - {name}" for name in self.tools)
+        else:
+            lines.append("  (none)")
         lines += [
             "stopping:",
             f"  max_steps: {_render_optional(stopping.max_steps)}",
