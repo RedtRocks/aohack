@@ -231,7 +231,7 @@ class TrajectoryRunner:
             )
             for task in suite.tasks
         )
-        return EvaluationRun(spec_id=spec.spec_id, task_set_id=suite.suite_id, records=records)
+        return EvaluationRun(spec_id=spec.spec_id, task_set_id=suite.domain, records=records)
 
     def as_task_runner(self):
         """Expose this runner as the :class:`~agent_engineer.ports.TaskRunner` callable

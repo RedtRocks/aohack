@@ -27,7 +27,7 @@ class _Task:
 
 @dataclass(frozen=True)
 class _Suite:
-    suite_id: str
+    domain: str
     tasks: tuple[_Task, ...]
 
 
@@ -98,7 +98,7 @@ def _suite() -> _Suite:
         _Task(task_id=f"t{i}", prompt=f"look up {key}", answer=value, metadata={"key": key})
         for i, (key, value) in enumerate(_LookupTool._TABLE.items())
     )
-    return _Suite(suite_id="lookup-suite", tasks=tasks)
+    return _Suite(domain="lookup-suite", tasks=tasks)
 
 
 def test_loop_runs_end_to_end_and_produces_a_lineage():
