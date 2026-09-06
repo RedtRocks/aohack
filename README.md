@@ -1,17 +1,30 @@
 # agent-engineer
 
-An automated agent-engineering loop that iteratively optimizes an `AgentSpec` across domain benchmarks. It synthesizes an initial agent specification, evaluates it against a domain task suite, diagnoses failures from trajectory structure alone, proposes targeted mutations along cause-honest escalation ladders, and accepts or reverts candidate mutations against an empirical noise floor.
+Most self-improving agent demos show a line going up. We measured how much of that line is noise. Three replicates per domain give a noise floor — 0.0067 on extraction — and we reject any mutation whose gain falls inside it, which rejected 9 of our 10. The one that survived gained +0.0238, three and a half times the floor, and the next generation lost 0.0119 and was reverted. Along the way the harness caught four things in our own system: a domain scoring 0.0000 because the agent was never handed tools, a mutation that improved its objective while the reported metric fell, 7 of 12 mutations whose stated rationale contradicted their own trajectory data, and memory that costs 29.6 tokens a task and saves nothing on single-turn work. The system takes a goal, tools, and a scorer, writes an agent spec, runs it, diagnoses only the failures, and makes one change aimed at the dominant cause. Four domains, and the engine never imports any of them.
 
-This repository is a hackathon submission evaluating four core questions:
-1. **How does the agent get better over time?** By proposing targeted mutations to prompts, strategies, memory, and budgets, keeping only those that measurably clear run-to-run sampling variance.
-2. **Can you show memory growing?** Through an `EpisodicMemoryStore` accumulating typed reflections (0 &rarr; 29 entries) with top-$k$ retrieval.
-3. **Can it learn contextual logic from tools?** By diagnosing execution failures from structural trajectory signals (tool errors, missing parameters, premature termination) and attempting targeted interventions.
-4. **Is it cost-effective?** By strictly pairing all accuracy numbers with token consumption and enforcing budget caps.
+Full empirical evidence, noise analysis, and failure traces are documented in [**FINDINGS.md**](FINDINGS.md) and [**LIMITATIONS.md**](LIMITATIONS.md).
 
-> [!IMPORTANT]
-> **What this project found**: The agent largely did **not** improve across live model runs (0/4 accepted on `code_math`, 0/4 accepted on `api_orchestration`, 1/4 accepted on `extraction` where partial credit rose while binary accuracy fell). The genuine strength of the system is what it **measured, caught, and prevented**: it rejected regressions, prevented false wins via empirical noise floors, exposed a silent benchmark bug through token cost accounting, and discovered and fixed a broken diagnosis-to-mutation link.
+---
 
-Full details are documented in [**FINDINGS.md**](FINDINGS.md) and [**LIMITATIONS.md**](LIMITATIONS.md).
+## Results at a Glance
+
+### Empirical Extraction Lineage (`extraction-gpt5-nano`)
+
+The keep-or-revert selection gate measures baseline noise across three independent replicates before evaluating mutations. Any score delta falling inside the noise floor is reverted.
+
+| generation | cause | mutation | before | after | delta | decision | noise floor |
+| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| 1 | `output_format_violation` | `system_prompt_rewrite` | 0.9279 | 0.9517 | **+0.0238** | **accepted** | 0.0067 |
+| 2 | `output_format_violation` | `strategy_changed` | 0.9517 | 0.9398 | -0.0119 | **reverted** | 0.0067 |
+
+### Four System Bugs Caught by the Harness
+
+| # | Bug / Failure Mode Caught | Empirical Measurement | Root Cause & Resolution | Source Artifact |
+| :-: | :--- | :--- | :--- | :--- |
+| **1** | **Silent tool omission** | `api_orchestration` scored 0.0000 binary accuracy with lowest token cost (234.7 tok/run vs 352.8–613.0). | Runner hardcoded `_NoTools()`; agent completed in 0 steps without tool schemas. Fixed in PR #13. | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md) |
+| **2** | **Objective divergence (Goodhart's Law)** | `extraction` Gen 4 accepted on `mean_score` (+0.0262 > 0.0159 floor), but binary accuracy fell 0.8571 &rarr; 0.8095. | Optimizing continuous partial credit (extracted fields) degraded strict all-or-nothing completion. | [`artifacts/cross_domain_live_comparison.md`](artifacts/cross_domain_live_comparison.md) |
+| **3** | **Contradictory mutation rationales** | 7 of 12 candidate mutations (58.3%) proposed changes whose rationales contradicted trajectory data. | Unconstrained fallback ladder proposed step-budget doublings and retrieval for format errors. Fixed in PR #12. | [`artifacts/diagnosis_mutation_audit.md`](artifacts/diagnosis_mutation_audit.md) |
+| **4** | **Memory token tax on single-turn tasks** | Episodic memory grew 0 &rarr; 29 entries, adding +29.6 tokens/task (+70.6% prompt overhead) with 0 tool calls saved. | Single-turn tasks have no multi-hop exploratory steps to prune; memory is pure overhead without tools. | [`artifacts/episodic_memory_growth_demo.md`](artifacts/episodic_memory_growth_demo.md) |
 
 ---
 
@@ -77,7 +90,7 @@ python -m agent_engineer run code_math --memory episodic_store --memory-store me
 Render verbatim lineage artifacts to the terminal:
 
 ```bash
-# Render live model extraction run (demonstrating Goodhart's law)
+# Render live model extraction run
 python -m agent_engineer render artifacts/extraction_gpt5_nano_lineage.json
 
 # Render live model code_math run (demonstrating ladder exhaustion)
@@ -99,20 +112,7 @@ Full suite: 271 passed, 1 skipped.
 
 ---
 
-## Headline Findings Summary
-
-| # | Headline Finding | Empirical Measurement / Evidence | Mechanism / Root Cause | Source Artifact |
-| :-: | :--- | :--- | :--- | :--- |
-| **1** | **Domain-Agnostic Diagnosis, Shown Live** | Diagnosed `output_format_violation` for extraction (14 tasks), and `premature_stop` for code_math (16 tasks) and api_orchestration (12 tasks). | Purely structural rules (`_rule_partial_credit`, `_rule_stopped_early`) over trajectory objects; no domain imports. | [`artifacts/cross_domain_live_comparison.md`](artifacts/cross_domain_live_comparison.md) |
-| **2** | **Silent Harness Bug Exposed by Token Cost** | `api_orchestration` scored 0.0000 binary accuracy. Token cost was **234.7 tok/run** (lowest of three domains, vs 352.8 and 613.0 for single-shot). | Tasks specified `call_tool` and `tool_schemas` in metadata, but the runner hardcoded `_NoTools()` and the backend discarded tools. Exactly 96 calls across 12 tasks (8.000 calls/task, 0 tool steps). Fixed in PR #13. | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md), PR #13 |
-| **3** | **Goodhart's Law Caught in Our Own System** | Extraction Gen 4 was accepted on `mean_score` (+0.0262 delta > 0.0159 noise floor), but binary `accuracy` fell 0.8571 &rarr; 0.8095 (-0.0476 drop). | The accuracy drop (-0.0476) sat inside accuracy's noise floor (0.0583). Optimizing partial credit cannibalized binary completion. Both floors measured. | [`artifacts/extraction_gpt5_nano_lineage.md`](artifacts/extraction_gpt5_nano_lineage.md) |
-| **4** | **Broken Diagnosis-to-Mutation Link Caught & Fixed** | Mutation proposals previously asserted causes different from the diagnosed failure (e.g. step budget increases for format violations). | Generic fallback ladder was proposing irrelevant moves. Fixed in `b6e8444`: strictly cause-honest ladders and deduplication over `(kind, target_path, after)`. | Commit [`b6e8444`](https://github.com/RedtRocks/aohack/commit/b6e844480b3a71f580fdee4d603f50f569d6dc75) |
-| **5** | **Honest Negative on Memory, with Mechanism** | Episodic memory grew 0 &rarr; 29 entries on `code_math`, adding **+29.6 tok/task** (+70.6%) prompt overhead without saving tool calls. | Single-turn tasks have zero execution steps to prune. Memory is a pure token tax unless it eliminates multi-hop tool exploration. | [`artifacts/episodic_memory_growth_demo.md`](artifacts/episodic_memory_growth_demo.md) |
-| **6** | **Measurement Discipline Throughout** | Zero LLM judges across all four domains. Accuracy denominator includes refusals; empty denominators are undefined, never zero. | Deterministic evaluators (code execution, JSON diffing, simulated API state verification). Noise floors measured before mutating. Accuracy always paired with cost. | [`LIMITATIONS.md`](LIMITATIONS.md), [`agent_engineer/evaluation/`](agent_engineer/evaluation/) |
-
----
-
 ## Detailed Reports
 
-* [**FINDINGS.md**](FINDINGS.md): In-depth technical breakdown of all six findings, including mathematical noise analysis, code disconnections, and live run data.
+* [**FINDINGS.md**](FINDINGS.md): In-depth technical breakdown of all six empirical findings, including mathematical noise analysis, code disconnections, and live run data.
 * [**LIMITATIONS.md**](LIMITATIONS.md): Transparent accounting of current build boundaries, scripted vs. live model boundaries, and harness guarantees.
