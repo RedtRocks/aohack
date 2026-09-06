@@ -71,7 +71,20 @@ def _evaluate_with_repeats(
     )
 
 
+def _load_env(path: Path) -> None:
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+
+
 def main() -> None:
+    # Load .env if present before checking os.environ
+    _load_env(REPO_ROOT / ".env")
+
     # 1. Verify required environment variables from os.environ ONLY
     for key in ("TENSORMUX_API_KEY", "OPENAI_API_KEY"):
         if not os.environ.get(key):
