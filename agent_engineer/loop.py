@@ -310,7 +310,12 @@ def run_loop(
     current_spec = root_spec
     current_run = runner.run_suite(current_spec, task_suite, generation=0)
     generations: list[GenerationRecord] = []
-    already_tried: set[tuple[str, str]] = set()
+    # Keyed by (kind, target_path, after) rather than just (kind, target_path):
+    # two edits to the same field with different resulting values -- REACT to
+    # PLAN_THEN_EXECUTE, then later PLAN_THEN_EXECUTE to REFLEXION -- are
+    # different mutations that deserve independent measurement, not the same
+    # move tried twice.
+    already_tried: set[tuple[str, str, str]] = set()
 
     for generation in range(1, max_generations + 1):
         diagnosis = diagnoser.diagnose(
@@ -340,7 +345,7 @@ def run_loop(
                 f"generation {generation}: no move left for cause {diagnosis.dominant_cause.value}"
             )
         mutation, child_spec = proposal
-        already_tried.add((mutation.kind.value, mutation.target_path))
+        already_tried.add((mutation.kind.value, mutation.target_path, mutation.after))
 
         # If child_spec introduced episodic memory, distill lessons from prior run now
         if (

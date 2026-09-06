@@ -8,16 +8,35 @@ engine's loop actually improve a real agent, not just wire together correctly
 against a scripted stand-in -- and it is intentionally kept outside the engine
 so nothing here can be mistaken for engine code.
 
-Every backend here is deliberately thin:
+**Strategy is real, not decorative.** Earlier versions of this module made one
+call per task regardless of ``spec.strategy``, which made ``strategy_changed``
+mutations a guaranteed no-op: reordering the loop shape could never move the
+score because nothing here ever read it. That silently invalidated a third of
+the mutation vocabulary against these text-only domains (no tools, so
+``stopping_adjusted`` is separately and legitimately a no-op here: a step
+budget only binds when there is more than one step, and there never is
+without a tool call). Two strategies now genuinely change what is sent to the
+model, each as two real provider calls rather than one:
 
-* One call per task, always. It never branches on ``spec.strategy``,
-  ``spec.memory``, or history -- it reads the spec's ``system_prompt`` and the
-  task's ``prompt`` and returns whatever the model said as the final answer.
-  A mutation that does not touch ``system_prompt`` text (a strategy change, a
-  memory reconfiguration, a stopping-budget raise) is therefore a genuine
-  no-op against these backends, and any measured movement from one of those
-  is sampling noise, not a real effect -- which is exactly what a real,
-  unmodified model should show.
+* ``PLAN_THEN_EXECUTE`` -- a first call asks only for a short plan, withheld
+  from the model as an answer; a second call hands that plan back as context
+  and asks for the real final answer. This is the literal "explicit step for
+  the deliberation it is currently skipping" the mutation ladder's own
+  rationale claims.
+* ``REFLEXION`` -- a first call drafts an answer; a second call shows the
+  draft back alongside the task and required format and asks the model to
+  either confirm it or emit a corrected final answer. This is a genuine
+  retry-on-format-failure, which is what a ``REFLEXION`` escalation is
+  supposed to buy an ``output_format_violation`` cause.
+
+Every other strategy (``SINGLE_SHOT``, ``REACT``, ``TREE_SEARCH``,
+``DELEGATING_SUBAGENTS``) still makes exactly one call, because this module
+has no tools to react to, no branches to search, and no subagents to
+delegate to -- implementing those distinctly here would be simulating a
+capability this experiment does not have, not measuring one. ``spec.memory``
+is still not read here: memory effects for these domains are the engine's own
+concern (episodic retrieval, wired through ``TrajectoryRunner``'s
+``memory_store``), not this backend's.
 * No domain vocabulary anywhere in this file. The system prompt comes from
   the engine's own :class:`~agent_engineer.stages.synthesize.TemplateSynthesizer`
   and the mutation ladder's own guidance text; this module only transports
@@ -53,6 +72,7 @@ from pathlib import Path
 import requests
 
 from agent_engineer.ports import AgentAction
+from agent_engineer.schemas import OrchestrationStrategy
 
 TIMEOUT_SECONDS = 60
 MAX_RETRIES = 1
@@ -99,16 +119,69 @@ class OpenAICompatibleBackend:
 
     def next_action(self, spec, task, tools, history) -> AgentAction:
         del tools, history  # this backend never calls a tool and never re-enters
+        if spec.strategy is OrchestrationStrategy.PLAN_THEN_EXECUTE:
+            return self._plan_then_execute(spec.system_prompt, task.prompt)
+        if spec.strategy is OrchestrationStrategy.REFLEXION:
+            return self._reflexion(spec.system_prompt, task.prompt)
+        return self._call_with_retry(spec.system_prompt, task.prompt)
+
+    def _call_with_retry(self, system_prompt: str, user_prompt: str) -> AgentAction:
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                return self._call(spec.system_prompt, task.prompt)
+                return self._call(system_prompt, user_prompt)
             except Exception as error:  # transient network/API failure
                 last_error = error
                 if attempt < MAX_RETRIES:
                     time.sleep(1.5 * (attempt + 1))
         assert last_error is not None
         raise last_error
+
+    def _plan_then_execute(self, system_prompt: str, task_prompt: str) -> AgentAction:
+        """Two real calls: a withheld plan, then the answer written with it in hand."""
+        plan_prompt = (
+            f"{task_prompt}\n\n"
+            "Do not answer yet. First write a short, numbered plan for how you will "
+            "solve this. Output only the plan."
+        )
+        plan_action = self._call_with_retry(system_prompt, plan_prompt)
+        answer_prompt = (
+            f"{task_prompt}\n\n"
+            "You already wrote this plan for solving it:\n"
+            f"{plan_action.final_answer}\n\n"
+            "Now carry out that plan and give the final answer, in the exact format "
+            "the task requires. Output only the final answer."
+        )
+        answer_action = self._call_with_retry(system_prompt, answer_prompt)
+        return AgentAction(
+            final_answer=answer_action.final_answer,
+            prompt_tokens=plan_action.prompt_tokens + answer_action.prompt_tokens,
+            completion_tokens=plan_action.completion_tokens + answer_action.completion_tokens,
+        )
+
+    def _reflexion(self, system_prompt: str, task_prompt: str) -> AgentAction:
+        """Two real calls: a draft answer, then an explicit self-check-and-revise pass.
+
+        This is the retry-on-format-failure a REFLEXION escalation is supposed to
+        buy an ``output_format_violation`` cause: the second call is shown its own
+        draft and the task again, and can either confirm it or replace it.
+        """
+        draft_action = self._call_with_retry(system_prompt, task_prompt)
+        revise_prompt = (
+            f"{task_prompt}\n\n"
+            "You drafted this answer:\n"
+            f"{draft_action.final_answer}\n\n"
+            "Check it against the task above: is every fact correct, and does the "
+            "answer's shape exactly match what was asked (no extra words, no wrong "
+            "structure)? If yes, repeat it unchanged. If not, output the corrected "
+            "final answer instead. Output only the final answer, nothing else."
+        )
+        revised_action = self._call_with_retry(system_prompt, revise_prompt)
+        return AgentAction(
+            final_answer=revised_action.final_answer,
+            prompt_tokens=draft_action.prompt_tokens + revised_action.prompt_tokens,
+            completion_tokens=draft_action.completion_tokens + revised_action.completion_tokens,
+        )
 
     def _call(self, system_prompt: str, user_prompt: str) -> AgentAction:
         self.calls_made += 1
