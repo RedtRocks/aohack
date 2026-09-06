@@ -30,13 +30,22 @@ model, each as two real provider calls rather than one:
   supposed to buy an ``output_format_violation`` cause.
 
 Every other strategy (``SINGLE_SHOT``, ``REACT``, ``TREE_SEARCH``,
-``DELEGATING_SUBAGENTS``) still makes exactly one call, because this module
-has no tools to react to, no branches to search, and no subagents to
-delegate to -- implementing those distinctly here would be simulating a
-capability this experiment does not have, not measuring one. ``spec.memory``
-is still not read here: memory effects for these domains are the engine's own
-concern (episodic retrieval, wired through ``TrajectoryRunner``'s
-``memory_store``), not this backend's.
+``DELEGATING_SUBAGENTS``) makes one HTTP call per *step*, not per task: when
+``tools`` is non-empty the request carries an OpenAI-style ``tools`` array
+and ``history`` (the ``ToolCall``s made so far) is replayed as prior
+assistant/tool messages, so the model can make a dependent call and see its
+result on the next step -- otherwise a domain like ``api_orchestration``
+could never be exercised through its tools at all. When ``tools`` is empty
+(code_math, extraction) the request carries no ``tools`` field and the model
+always answers on the first turn, exactly as before -- the tool-calling path
+is a strict superset of the old single-shot behavior, not a replacement for
+it. ``PLAN_THEN_EXECUTE`` and ``REFLEXION`` do not thread ``tools`` or
+``history`` through their two internal calls: they exist for the text-only
+domains this experiment was built against, and combining two-call
+deliberation with a tool-calling ReAct loop is a distinct escalation nothing
+here claims to model. ``spec.memory`` is still not read here: memory effects
+are the engine's own concern (episodic retrieval, wired through
+``TrajectoryRunner``'s ``memory_store``), not this backend's.
 * No domain vocabulary anywhere in this file. The system prompt comes from
   the engine's own :class:`~agent_engineer.stages.synthesize.TemplateSynthesizer`
   and the mutation ladder's own guidance text; this module only transports
@@ -88,6 +97,63 @@ class ApiKeyMissing(RuntimeError):
     """Raised when a required API key env var is not set. Never simulated around."""
 
 
+def _render_tools(tools) -> list[dict]:
+    """``ToolSchema`` tuple -> the OpenAI ``tools`` array shape. Empty in, empty out."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _simple_messages(system_prompt: str, user_prompt: str) -> list[dict]:
+    """The plain two-message shape, with no tool history -- what
+    ``PLAN_THEN_EXECUTE`` and ``REFLEXION`` send for each of their two
+    internal calls, since neither threads tools through this backend."""
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _build_messages(system_prompt: str, user_prompt: str, history) -> list[dict]:
+    """Replay ``history`` (the ``ToolCall``s made so far) as prior turns, since
+    this backend is stateless across HTTP calls: every step reconstructs the
+    whole conversation from the trajectory recorded outside it, rather than
+    holding any state of its own."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    for call in history:
+        call_id = f"call_{call.ordinal}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": call.tool_name,
+                            "arguments": json.dumps(call.args),
+                        },
+                    }
+                ],
+            }
+        )
+        content = call.error if call.error is not None else json.dumps(call.result)
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+    return messages
+
+
 class OpenAICompatibleBackend:
     """Calls a real model once per task over an OpenAI-compatible chat-completions
     API. Stateless across calls, no memoization: every call is an independent
@@ -118,18 +184,19 @@ class OpenAICompatibleBackend:
         self.total_tokens = 0
 
     def next_action(self, spec, task, tools, history) -> AgentAction:
-        del tools, history  # this backend never calls a tool and never re-enters
         if spec.strategy is OrchestrationStrategy.PLAN_THEN_EXECUTE:
             return self._plan_then_execute(spec.system_prompt, task.prompt)
         if spec.strategy is OrchestrationStrategy.REFLEXION:
             return self._reflexion(spec.system_prompt, task.prompt)
-        return self._call_with_retry(spec.system_prompt, task.prompt)
+        messages = _build_messages(spec.system_prompt, task.prompt, history)
+        api_tools = _render_tools(tools)
+        return self._call_with_retry(messages, api_tools)
 
-    def _call_with_retry(self, system_prompt: str, user_prompt: str) -> AgentAction:
+    def _call_with_retry(self, messages: list[dict], api_tools: list[dict]) -> AgentAction:
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                return self._call(system_prompt, user_prompt)
+                return self._call(messages, api_tools)
             except Exception as error:  # transient network/API failure
                 last_error = error
                 if attempt < MAX_RETRIES:
@@ -144,7 +211,7 @@ class OpenAICompatibleBackend:
             "Do not answer yet. First write a short, numbered plan for how you will "
             "solve this. Output only the plan."
         )
-        plan_action = self._call_with_retry(system_prompt, plan_prompt)
+        plan_action = self._call_with_retry(_simple_messages(system_prompt, plan_prompt), [])
         answer_prompt = (
             f"{task_prompt}\n\n"
             "You already wrote this plan for solving it:\n"
@@ -152,7 +219,7 @@ class OpenAICompatibleBackend:
             "Now carry out that plan and give the final answer, in the exact format "
             "the task requires. Output only the final answer."
         )
-        answer_action = self._call_with_retry(system_prompt, answer_prompt)
+        answer_action = self._call_with_retry(_simple_messages(system_prompt, answer_prompt), [])
         return AgentAction(
             final_answer=answer_action.final_answer,
             prompt_tokens=plan_action.prompt_tokens + answer_action.prompt_tokens,
@@ -166,7 +233,7 @@ class OpenAICompatibleBackend:
         buy an ``output_format_violation`` cause: the second call is shown its own
         draft and the task again, and can either confirm it or replace it.
         """
-        draft_action = self._call_with_retry(system_prompt, task_prompt)
+        draft_action = self._call_with_retry(_simple_messages(system_prompt, task_prompt), [])
         revise_prompt = (
             f"{task_prompt}\n\n"
             "You drafted this answer:\n"
@@ -176,24 +243,23 @@ class OpenAICompatibleBackend:
             "structure)? If yes, repeat it unchanged. If not, output the corrected "
             "final answer instead. Output only the final answer, nothing else."
         )
-        revised_action = self._call_with_retry(system_prompt, revise_prompt)
+        revised_action = self._call_with_retry(_simple_messages(system_prompt, revise_prompt), [])
         return AgentAction(
             final_answer=revised_action.final_answer,
             prompt_tokens=draft_action.prompt_tokens + revised_action.prompt_tokens,
             completion_tokens=draft_action.completion_tokens + revised_action.completion_tokens,
         )
 
-    def _call(self, system_prompt: str, user_prompt: str) -> AgentAction:
+    def _call(self, messages: list[dict], api_tools: list[dict]) -> AgentAction:
         self.calls_made += 1
         token_key = "max_completion_tokens" if self._reasoning_effort else "max_tokens"
         payload = {
             "model": self._model,
             token_key: self._max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": messages,
         }
+        if api_tools:
+            payload["tools"] = api_tools
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
         if self._disable_thinking:
@@ -211,6 +277,23 @@ class OpenAICompatibleBackend:
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
         self.total_tokens += prompt_tokens + completion_tokens
+
+        tool_calls = choice.get("tool_calls") or []
+        if tool_calls:
+            call = tool_calls[0]
+            function = call.get("function", {})
+            name = function.get("name")
+            raw_args = function.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            except (TypeError, ValueError):
+                args = {}
+            return AgentAction(
+                tool_name=name,
+                args=args if isinstance(args, dict) else {},
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
         return AgentAction(
             final_answer=choice.get("content") or "",
             prompt_tokens=prompt_tokens,
