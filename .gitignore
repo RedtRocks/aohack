@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.env
 artifacts/real_model_call_cache.json
 agent_engineer.egg-info/
 uv.lock
