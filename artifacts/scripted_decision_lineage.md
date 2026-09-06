@@ -1,12 +1,12 @@
 # code_math keep-or-revert, exercised end to end (SCRIPTED)
 
-**SCRIPTED -- no live model was used to produce this lineage.** _TieredBackend: solves a fixed, chosen number of the 16 code_math tasks correctly per generation, read off the spec id. Not a model.
+**SCRIPTED -- no live model was used to produce this lineage.** _TieredWithNoiseBackend: solves a fixed, chosen number of the 16 code_math tasks correctly per generation, read off the spec id, plus one task with hand-scripted variance for the harness to find. Not a model.
 
-Domain: `code_math` &middot; 16 tasks &middot; selection policy: `MinimumDeltaPolicy(min_delta=0.117851)  # the measured noise floor`
+Domain: `code_math` &middot; 16 tasks &middot; selection policy: `run_loop default (noise-aware; no selection_policy passed)`
 
 ## Noise floor
 
-agent_engineer.evaluation.Evaluator, repeats=3, on a probe backend with one attempt-flaky task (population variance of one flip in three attempts is 2/9, spread over the suite).
+measured automatically by agent_engineer.loop.run_loop's own default (Evaluator, repeats=3, on the root spec) -- not configured by this script.
 
 - reliability (variance): `0.013889`
 - noise floor (std): `0.117851`

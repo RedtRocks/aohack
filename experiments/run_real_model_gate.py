@@ -1,4 +1,4 @@
-"""Run the real five-stage loop against real GPT-5 nano on code_math, and save the
+"""Run the real five-stage loop against a real model on code_math, and save the
 verbatim lineage plus a harness-computed accuracy/cost/reliability comparison.
 
 This answers the question the scripted gate test (``tests/test_code_math_loop_end_to_end.py``)
@@ -10,7 +10,9 @@ repo artifact.
 
 What it does, in order, all against the real ``agent_engineer.domains.code_math``
 suite and evaluator, with :class:`~agent_engineer.ports.ModelBackend` supplied
-by real GPT-5 nano (``experiments/gpt5_nano_backend.py``):
+by a real model (``experiments/gpt5_nano_backend.py``): GLM 4.7 Flash via
+TensorMux is the primary, GPT-5 nano is the fallback if the primary fails or
+rate-limits (see :class:`~gpt5_nano_backend.FallbackBackend`).
 
 1. Synthesizes one root :class:`AgentSpec` (via the engine's own
    ``TemplateSynthesizer`` -- generic scaffolding, no domain vocabulary).
@@ -28,8 +30,9 @@ by real GPT-5 nano (``experiments/gpt5_nano_backend.py``):
 5. Repeats step 2-3 for the loop's final spec, so baseline and final are
    measured the same way and are directly comparable.
 
-Requires ``OPENAI_API_KEY`` in the environment. Stops immediately, without
-simulating anything, if it is not set.
+Requires ``TENSORMUX_API_KEY`` (primary) and ``OPENAI_API_KEY`` (fallback) in
+the environment. Stops immediately, without simulating anything, if either is
+not set.
 """
 
 from __future__ import annotations
@@ -41,7 +44,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gpt5_nano_backend import ApiKeyMissing, GPT5NanoBackend, MODEL  # noqa: E402
+from gpt5_nano_backend import (  # noqa: E402
+    ApiKeyMissing,
+    FallbackBackend,
+    GPT5NanoBackend,
+    TensorMuxGLMBackend,
+)
 
 from agent_engineer.domains.code_math import DOMAIN, EVALUATOR_ID, get_evaluator, get_suite  # noqa: E402
 from agent_engineer.evaluation import Evaluator  # noqa: E402
@@ -49,6 +57,7 @@ from agent_engineer.evaluation.metrics import population_variance  # noqa: E402
 from agent_engineer.loop import run_loop  # noqa: E402
 from agent_engineer.ports import ToolResult, ToolSchema  # noqa: E402
 from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner  # noqa: E402
+from agent_engineer.stages.select import MinimumDeltaPolicy  # noqa: E402
 from agent_engineer.stages.synthesize import TemplateSynthesizer  # noqa: E402
 
 SPEC_ID = "code-math-gpt5-nano"
@@ -116,10 +125,12 @@ def _domain_report_dict(iteration_report, domain: str) -> dict:
 
 def main() -> None:
     try:
-        backend = GPT5NanoBackend()
+        primary = TensorMuxGLMBackend()
+        secondary = GPT5NanoBackend()
     except ApiKeyMissing as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         raise SystemExit(1)
+    backend = FallbackBackend(primary, secondary)
 
     tool_runtime = _NoTools()
     suite = get_suite()
@@ -143,6 +154,11 @@ def main() -> None:
     baseline_report = harness.run_iteration(0, root_spec, _replay_runner(baseline_replicates))
 
     print(f"[3/5] running the real five-stage loop ({MAX_GENERATIONS} generations max)...", flush=True)
+    # run_loop's own default would otherwise measure this same noise floor itself
+    # (another real repeats=3 pass, another len(suite.tasks)*3 calls) -- pass the
+    # floor already measured above explicitly so that measurement is not paid for
+    # twice.
+    noise_floor_std = max(1e-9, noise_variance**0.5)
     lineage = run_loop(
         spec_id=SPEC_ID,
         goal=GOAL,
@@ -154,6 +170,7 @@ def main() -> None:
         max_generations=MAX_GENERATIONS,
         metric="mean_score",
         synthesizer=_FixedSpecSynthesizer(root_spec),
+        selection_policy=MinimumDeltaPolicy(min_delta=noise_floor_std),
     )
     for line in lineage.summary_lines():
         print(f"    {line}", flush=True)
@@ -170,10 +187,14 @@ def main() -> None:
         final_replicates = baseline_replicates
         final_report = baseline_report
 
-    print(f"[5/5] writing artifact ({backend.calls_made} real model calls made total)...", flush=True)
+    print(f"[5/5] writing artifact ({backend.calls_made} real model calls made total: "
+          f"{backend.primary_calls} primary / {backend.secondary_calls} fallback)...", flush=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     artifact = {
-        "model": MODEL,
+        "primary_model": "glm-4-7-flash (via TensorMux)",
+        "fallback_model": "gpt-5-nano (via OpenAI)",
+        "primary_calls": backend.primary_calls,
+        "fallback_calls": backend.secondary_calls,
         "domain": DOMAIN,
         "spec_id": SPEC_ID,
         "goal": GOAL,
