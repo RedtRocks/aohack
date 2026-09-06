@@ -37,6 +37,7 @@ not set.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -55,14 +56,23 @@ from gpt5_nano_backend import (  # noqa: E402
     TensorMuxGLMBackend,
 )
 
-from agent_engineer.domains.code_math import DOMAIN, EVALUATOR_ID, get_evaluator, get_suite  # noqa: E402
-from agent_engineer.evaluation import Evaluator  # noqa: E402
+import agent_engineer.domains as domain_registry  # noqa: E402
+from agent_engineer.domains.code_math import EVALUATOR_ID as CM_EVALUATOR_ID  # noqa: E402
+from agent_engineer.domains.api_orchestration.evaluator import EVALUATOR_ID as AO_EVALUATOR_ID  # noqa: E402
+from agent_engineer.domains.extraction.evaluator import EVALUATOR_ID as EX_EVALUATOR_ID  # noqa: E402
+from agent_engineer.evaluation import DomainSuite, Evaluator  # noqa: E402
 from agent_engineer.evaluation.metrics import population_variance  # noqa: E402
 from agent_engineer.loop import run_loop  # noqa: E402
 from agent_engineer.ports import ToolResult, ToolSchema  # noqa: E402
 from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner  # noqa: E402
 from agent_engineer.stages.select import MinimumDeltaPolicy  # noqa: E402
 from agent_engineer.stages.synthesize import TemplateSynthesizer  # noqa: E402
+
+EVALUATOR_IDS = {
+    "code_math": CM_EVALUATOR_ID,
+    "api_orchestration": AO_EVALUATOR_ID,
+    "extraction": EX_EVALUATOR_ID,
+}
 
 SPEC_ID = "code-math-gpt5-nano"
 GOAL = "Solve each task exactly, in the exact output format the prompt asks for."
@@ -71,7 +81,7 @@ NOISE_REPLICATES = 3
 ARTIFACT_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 CACHE_PATH = ARTIFACT_DIR / "real_model_call_cache.json"
 
-DEFAULT_SPEND_CAP_TOKENS = 20_000
+DEFAULT_SPEND_CAP_TOKENS = 300_000
 """Hard cap on cumulative tokens for one run of this script. Overridable via
 the SPEND_CAP_TOKENS env var. Crossing it raises SpendCapExceeded immediately
 -- mid-phase, not just discovered after the fact -- because the keys this
@@ -79,7 +89,7 @@ script spends against are limited and there is no second set."""
 
 
 class _NoTools:
-    """code_math needs no tools: every task is answered directly."""
+    """Every task is answered directly: no tools exposed to the model."""
 
     def schemas(self) -> tuple[ToolSchema, ...]:
         return ()
@@ -135,6 +145,55 @@ def _domain_report_dict(iteration_report, domain: str) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run real model gate on a domain.")
+    parser.add_argument(
+        "--domain",
+        default="code_math",
+        choices=["code_math", "api_orchestration", "extraction"],
+        help="Domain to run",
+    )
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Limit number of tasks (e.g. 3 for pilot)",
+    )
+    parser.add_argument(
+        "--max-generations",
+        type=int,
+        default=MAX_GENERATIONS,
+        help="Max generations in loop",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=NOISE_REPLICATES,
+        help="Number of replicates for noise floor",
+    )
+    parser.add_argument(
+        "--spec-id",
+        default=None,
+        help="Custom spec ID (defaults to <domain>-gpt5-nano)",
+    )
+    parser.add_argument(
+        "--artifact-name",
+        default=None,
+        help="Custom artifact filename (defaults to <domain>_gpt5_nano_lineage.json)",
+    )
+    parser.add_argument(
+        "--pilot",
+        action="store_true",
+        help="Run 3-task pilot with repeats=3, 1 generation and verify tokens/elapsed_seconds",
+    )
+    args = parser.parse_args()
+
+    domain = args.domain
+    max_generations = 1 if args.pilot else args.max_generations
+    repeats = args.repeats
+    max_tasks = 3 if args.pilot else args.max_tasks
+    spec_id = args.spec_id or ("code-math-pilot" if args.pilot else (SPEC_ID if domain == "code_math" else f"{domain.replace('_', '-')}-gpt5-nano"))
+    artifact_name = args.artifact_name or ("code_math_pilot_lineage.json" if args.pilot else f"{domain}_gpt5_nano_lineage.json")
+
     try:
         primary = TensorMuxGLMBackend()
         secondary = GPT5NanoBackend()
@@ -143,6 +202,7 @@ def main() -> None:
         raise SystemExit(1)
 
     spend_cap = int(os.environ.get("SPEND_CAP_TOKENS", DEFAULT_SPEND_CAP_TOKENS))
+    print(f"domain: {domain}, spec_id: {spec_id}, artifact: {artifact_name}", flush=True)
     print(f"spend cap for this run: {spend_cap} tokens", flush=True)
     # every call, real or replayed from cache, is logged and checked against the
     # cap the instant it happens -- not once per phase, so a kill mid-run leaves
@@ -154,13 +214,18 @@ def main() -> None:
     )
 
     tool_runtime = _NoTools()
-    suite = get_suite()
-    evaluator = get_evaluator()
+    full_suite = domain_registry.get_suite(domain)
+    if max_tasks is not None:
+        suite = DomainSuite(domain=full_suite.domain, tasks=full_suite.tasks[:max_tasks])
+    else:
+        suite = full_suite
+    evaluator = domain_registry.get_evaluator(domain)
+    evaluator_id = EVALUATOR_IDS[domain]
     runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
-    harness = Evaluator([suite], evaluators={DOMAIN: evaluator}, repeats=NOISE_REPLICATES)
+    harness = Evaluator([suite], evaluators={domain: evaluator}, repeats=repeats)
 
     root_spec = TemplateSynthesizer().synthesize(
-        spec_id=SPEC_ID, goal=GOAL, tools=tool_runtime.schemas(), evaluator_id=EVALUATOR_ID
+        spec_id=spec_id, goal=GOAL, tools=tool_runtime.schemas(), evaluator_id=evaluator_id
     )
 
     def _write_truncated(reason: str) -> None:
@@ -175,7 +240,7 @@ def main() -> None:
             "primary_calls": fallback.primary_calls,
             "fallback_calls": fallback.secondary_calls,
         }
-        (ARTIFACT_DIR / "code_math_gpt5_nano_lineage.json").write_text(
+        (ARTIFACT_DIR / artifact_name).write_text(
             json.dumps(partial, indent=2), encoding="utf-8"
         )
         print(f"TRUNCATED: {reason}", file=sys.stderr)
@@ -184,9 +249,9 @@ def main() -> None:
               file=sys.stderr)
 
     try:
-        print(f"[1/5] measuring baseline noise floor: {NOISE_REPLICATES} real replicate suite runs "
+        print(f"[1/5] measuring baseline noise floor: {repeats} real replicate suite runs "
               f"on the root spec ({len(suite.tasks)} tasks each)...", flush=True)
-        baseline_replicates = _replicate_runs(runner, suite, root_spec, n=NOISE_REPLICATES, tag="baseline")
+        baseline_replicates = _replicate_runs(runner, suite, root_spec, n=repeats, tag="baseline")
         baseline_scores = [run.mean_score for run in baseline_replicates]
         noise_variance = population_variance(baseline_scores)
         print(f"    baseline mean_score across replicates: {baseline_scores}", flush=True)
@@ -196,21 +261,21 @@ def main() -> None:
               "for canonical accuracy+cost+reliability...", flush=True)
         baseline_report = harness.run_iteration(0, root_spec, _replay_runner(baseline_replicates))
 
-        print(f"[3/5] running the real five-stage loop ({MAX_GENERATIONS} generations max)...", flush=True)
+        print(f"[3/5] running the real five-stage loop ({max_generations} generations max)...", flush=True)
         # run_loop's own default would otherwise measure this same noise floor itself
         # (another real repeats=3 pass, another len(suite.tasks)*3 calls) -- pass the
         # floor already measured above explicitly so that measurement is not paid for
         # twice.
         noise_floor_std = max(1e-9, noise_variance**0.5)
         lineage = run_loop(
-            spec_id=SPEC_ID,
+            spec_id=spec_id,
             goal=GOAL,
             tool_runtime=tool_runtime,
             backend=backend,
             evaluator=evaluator,
-            evaluator_id=EVALUATOR_ID,
+            evaluator_id=evaluator_id,
             task_suite=suite,
-            max_generations=MAX_GENERATIONS,
+            max_generations=max_generations,
             metric="mean_score",
             synthesizer=_FixedSpecSynthesizer(root_spec),
             selection_policy=MinimumDeltaPolicy(min_delta=noise_floor_std),
@@ -222,7 +287,7 @@ def main() -> None:
         if lineage.final_spec.spec_id != root_spec.spec_id:
             print("[4/5] measuring the final spec the same way as the baseline...", flush=True)
             final_replicates = _replicate_runs(
-                runner, suite, lineage.final_spec, n=NOISE_REPLICATES, tag="final"
+                runner, suite, lineage.final_spec, n=repeats, tag="final"
             )
             final_report = harness.run_iteration(1, lineage.final_spec, _replay_runner(final_replicates))
         else:
@@ -243,8 +308,8 @@ def main() -> None:
         "fallback_model": "gpt-5-nano (via OpenAI)",
         "primary_calls": fallback.primary_calls,
         "fallback_calls": fallback.secondary_calls,
-        "domain": DOMAIN,
-        "spec_id": SPEC_ID,
+        "domain": domain,
+        "spec_id": spec_id,
         "goal": GOAL,
         "task_count": len(suite.tasks),
         "real_model_calls_made": backend.calls_made,
@@ -254,10 +319,10 @@ def main() -> None:
             "replicate_scores": baseline_scores,
             "population_variance": noise_variance,
             "population_std": noise_variance**0.5,
-            "replicates": NOISE_REPLICATES,
+            "replicates": repeats,
         },
-        "baseline": _domain_report_dict(baseline_report, DOMAIN),
-        "final": _domain_report_dict(final_report, DOMAIN),
+        "baseline": _domain_report_dict(baseline_report, domain),
+        "final": _domain_report_dict(final_report, domain),
         "lineage": [
             {
                 "generation": record.generation,
@@ -276,9 +341,39 @@ def main() -> None:
         "root_spec_id": lineage.root_spec.spec_id,
         "final_spec_id": lineage.final_spec.spec_id,
     }
-    (ARTIFACT_DIR / "code_math_gpt5_nano_lineage.json").write_text(
+    (ARTIFACT_DIR / artifact_name).write_text(
         json.dumps(artifact, indent=2), encoding="utf-8"
     )
+    print(f"wrote {ARTIFACT_DIR / artifact_name}", flush=True)
+
+    try:
+        from render_lineage_markdown import render
+        md_name = Path(artifact_name).with_suffix(".md").name
+        (ARTIFACT_DIR / md_name).write_text(render(artifact), encoding="utf-8")
+        print(f"wrote {ARTIFACT_DIR / md_name}", flush=True)
+    except Exception as exc:
+        print(f"markdown rendering failed: {exc}", file=sys.stderr)
+
+    if args.pilot:
+        print("\n=== PILOT RUN VERIFICATION ===")
+        print(f"Tasks: {len(suite.tasks)}, Repeats: {repeats}, Generations: {len(lineage.generations)}")
+        print(f"Total model calls made: {backend.calls_made}")
+        print(f"Total tokens spent: {backend.total_tokens}")
+        print(f"Primary calls (TensorMux): {fallback.primary_calls}, Fallback calls: {fallback.secondary_calls}")
+        assert backend.calls_made > 0, "No model calls were made!"
+        assert backend.total_tokens > 0, "Zero tokens spent! Calls must report real cost."
+        all_trajectories = [r.trajectory for run in baseline_replicates for r in run.records]
+        for gen in lineage.generations:
+            all_trajectories.extend([r.trajectory for r in gen.evaluation_before.records])
+            all_trajectories.extend([r.trajectory for r in gen.evaluation_after.records])
+        for t in all_trajectories:
+            assert t.tokens.total_tokens > 0, f"Trajectory {t.trajectory_id} has 0 tokens!"
+            assert t.elapsed_seconds > 0.0, f"Trajectory {t.trajectory_id} has 0 elapsed time!"
+        print(f"Confirmed: all {len(all_trajectories)} recorded trajectories have non-zero tokens and positive elapsed_seconds.")
+        sample = all_trajectories[0]
+        print(f"Sample trajectory ({sample.trajectory_id}): prompt_tokens={sample.tokens.prompt_tokens}, completion_tokens={sample.tokens.completion_tokens}, elapsed={sample.elapsed_seconds:.3f}s")
+        print("PILOT VERIFICATION PASSED.\n")
+
     print("done.", flush=True)
 
 

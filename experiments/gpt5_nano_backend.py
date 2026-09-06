@@ -112,9 +112,10 @@ class OpenAICompatibleBackend:
 
     def _call(self, system_prompt: str, user_prompt: str) -> AgentAction:
         self.calls_made += 1
+        token_key = "max_completion_tokens" if self._reasoning_effort else "max_tokens"
         payload = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            token_key: self._max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

@@ -21,7 +21,7 @@ def _fmt_metric(metric: dict, unit: str = "") -> str:
 
 def render(data: dict) -> str:
     lines = [
-        "# code_math x a real model: a live run through the engine loop",
+        f"# {data['domain']} x a real model: a live run through the engine loop",
         "",
         f"Primary model: `{data['primary_model']}` &middot; fallback: `{data['fallback_model']}` "
         f"&middot; domain: `{data['domain']}` &middot; {data['task_count']} tasks &middot; "
@@ -85,13 +85,22 @@ def render(data: dict) -> str:
 
 
 def main() -> None:
-    if not JSON_PATH.exists():
-        print(f"no artifact at {JSON_PATH}; run experiments/run_real_model_gate.py first",
+    if len(sys.argv) > 1:
+        json_path = Path(sys.argv[1])
+        if not json_path.is_absolute():
+            json_path = (Path.cwd() / json_path).resolve()
+        md_path = json_path.with_suffix(".md")
+    else:
+        json_path = JSON_PATH
+        md_path = MD_PATH
+
+    if not json_path.exists():
+        print(f"no artifact at {json_path}; run experiments/run_real_model_gate.py first",
               file=sys.stderr)
         raise SystemExit(1)
-    data = json.loads(JSON_PATH.read_text(encoding="utf-8"))
-    MD_PATH.write_text(render(data), encoding="utf-8")
-    print(f"wrote {MD_PATH}")
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    md_path.write_text(render(data), encoding="utf-8")
+    print(f"wrote {md_path}")
 
 
 if __name__ == "__main__":
