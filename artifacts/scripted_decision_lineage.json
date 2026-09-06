@@ -1,0 +1,49 @@
+{
+  "label": "SCRIPTED -- no live model was used to produce this lineage",
+  "backend": "_TieredBackend: solves a fixed, chosen number of the 16 code_math tasks correctly per generation, read off the spec id. Not a model.",
+  "domain": "code_math",
+  "task_count": 16,
+  "noise_floor": {
+    "source": "agent_engineer.evaluation.Evaluator, repeats=3, on a probe backend with one attempt-flaky task (population variance of one flip in three attempts is 2/9, spread over the suite)",
+    "reliability_variance": 0.01388888888888889,
+    "reliability_std": 0.11785113019775792
+  },
+  "selection_policy": "MinimumDeltaPolicy(min_delta=0.117851)  # the measured noise floor",
+  "root_spec_id": "mixed-lineage-agent",
+  "final_spec_id": "mixed-lineage-agent-g2",
+  "lineage": [
+    {
+      "generation": 1,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "system_prompt_rewrite",
+      "target_path": "system_prompt",
+      "before": 0.625,
+      "after": 0.1875,
+      "delta": -0.4375,
+      "decision": "reverted",
+      "reason": "measured 0.6250 -> 0.1875 (delta -0.4375), which does not clear the 0.117851 keep threshold; reverting to the parent spec"
+    },
+    {
+      "generation": 2,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "strategy_changed",
+      "target_path": "strategy",
+      "before": 0.625,
+      "after": 0.8125,
+      "delta": 0.1875,
+      "decision": "accepted",
+      "reason": "measured 0.6250 -> 0.8125 (delta +0.1875), which clears the 0.117851 keep threshold"
+    },
+    {
+      "generation": 3,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "stopping_adjusted",
+      "target_path": "stopping.max_steps",
+      "before": 0.8125,
+      "after": 0.875,
+      "delta": 0.0625,
+      "decision": "reverted",
+      "reason": "measured 0.8125 -> 0.8750 (delta +0.0625), which does not clear the 0.117851 keep threshold; reverting to the parent spec"
+    }
+  ]
+}
