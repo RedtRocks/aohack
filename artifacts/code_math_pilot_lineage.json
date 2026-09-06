@@ -1,0 +1,74 @@
+{
+  "primary_model": "glm-4-7-flash (via TensorMux)",
+  "fallback_model": "gpt-5-nano (via OpenAI)",
+  "primary_calls": 12,
+  "fallback_calls": 0,
+  "domain": "code_math",
+  "spec_id": "code-math-pilot",
+  "goal": "Solve each task exactly, in the exact output format the prompt asks for.",
+  "task_count": 3,
+  "real_model_calls_made": 12,
+  "cumulative_tokens": 4112,
+  "noise_floor": {
+    "metric": "mean_score",
+    "replicate_scores": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "population_variance": 0.0,
+    "population_std": 0.0,
+    "replicates": 3
+  },
+  "baseline": {
+    "accuracy": {
+      "value": 1.0,
+      "sample_size": 9,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.0,
+      "sample_size": 3,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 343.1111111111111,
+      "sample_size": 9,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 3.933687622222755,
+      "sample_size": 9,
+      "reason": null
+    },
+    "task_count": 3,
+    "repeats": 3
+  },
+  "final": {
+    "accuracy": {
+      "value": 1.0,
+      "sample_size": 9,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.0,
+      "sample_size": 3,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 343.1111111111111,
+      "sample_size": 9,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 3.933687622222755,
+      "sample_size": 9,
+      "reason": null
+    },
+    "task_count": 3,
+    "repeats": 3
+  },
+  "lineage": [],
+  "root_spec_id": "code-math-pilot",
+  "final_spec_id": "code-math-pilot"
+}
