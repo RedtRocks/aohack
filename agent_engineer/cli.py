@@ -106,7 +106,9 @@ class ScriptedBackend:
         from agent_engineer.ports import AgentAction
 
         tier = self._tier(spec.spec_id)
-        solved_slots = self._base + self._step * tier
+        prompt_text = getattr(spec, "system_prompt", "") or ""
+        memory_count = prompt_text.count("- [SUCCESS]") + prompt_text.count("- [FAILURE LESSON]")
+        solved_slots = self._base + self._step * tier + memory_count * 2
         # Deterministic per-task admission, independent of Python's randomized
         # str hash (PYTHONHASHSEED): a fixed digest of the task id, stable
         # across processes and across runs, so the same tier always admits the
@@ -115,10 +117,11 @@ class ScriptedBackend:
         digest = int(hashlib.sha256(task.task_id.encode()).hexdigest(), 16) % 1000
         threshold = min(1000, solved_slots * 1000 // max(1, _EXPECTED_SUITE_SIZE))
         admitted = digest < threshold
+        prompt_tokens = 30 + memory_count * 8
         if task.expected is not None and admitted:
-            return AgentAction(final_answer=task.expected, prompt_tokens=30, completion_tokens=20)
+            return AgentAction(final_answer=task.expected, prompt_tokens=prompt_tokens, completion_tokens=20)
         return AgentAction(
-            final_answer="unable to complete this task", prompt_tokens=30, completion_tokens=10
+            final_answer="unable to complete this task", prompt_tokens=prompt_tokens, completion_tokens=10
         )
 
 
@@ -310,6 +313,8 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
         if rationale:
             lines.append(f"  rationale               : {rationale}")
         lines.append(f"  before -> after         : {before_str} -> {after_str}  (delta {delta_str})")
+        if "memory_store_size" in gen:
+            lines.append(f"  memory store size       : {gen['memory_store_size']} entries")
         if reason:
             lines.append(f"  verdict                 : {reason}")
 
@@ -371,6 +376,10 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
             "on the root spec, repeats=3 -- not a fixed epsilon)"
         )
 
+    if data.get("memory_growth_table"):
+        lines.append("")
+        lines.append(data["memory_growth_table"])
+
     return "\n".join(lines)
 
 
@@ -399,6 +408,7 @@ def export_lineage_to_dict(
         "selection_policy": "run_loop default (noise-aware keep threshold)",
         "root_spec_id": report.root_spec.spec_id,
         "final_spec_id": report.final_spec.spec_id,
+        "memory_growth_table": report.memory_growth_table() if report.generations else "",
         "lineage": [
             {
                 "generation": record.generation,
@@ -413,6 +423,7 @@ def export_lineage_to_dict(
                 "reason": record.verdict.reason,
                 "spec_before": record.spec_before.model_dump(mode="json"),
                 "spec_after": record.spec_after.model_dump(mode="json"),
+                "memory_store_size": record.memory_store_size,
             }
             for record in report.generations
         ],
@@ -428,6 +439,8 @@ def run_domain(
     repeats: int = 3,
     stream: bool = True,
     output_path: str | Path | None = None,
+    memory: str | None = None,
+    memory_store_path: str | Path | None = None,
 ) -> LineageReport:
     if domain not in DOMAIN_NAMES:
         raise SystemExit(
@@ -437,6 +450,19 @@ def run_domain(
     evaluator = get_evaluator(domain)
     tool_runtime = NullToolRuntime()
     backend = AnthropicBackend() if backend_name == "anthropic" else ScriptedBackend()
+
+    synthesizer = None
+    if memory == "episodic_store":
+        from agent_engineer.schemas import MemoryConfig, MemoryKind
+        from agent_engineer.stages.synthesize import TemplateSynthesizer
+
+        synthesizer = TemplateSynthesizer(
+            memory=MemoryConfig(
+                kind=MemoryKind.EPISODIC_STORE,
+                retrieval_k=3,
+                persist_across_runs=True,
+            )
+        )
 
     if stream:
         _print(f"domain: {domain}  ({len(suite.tasks)} tasks)  backend: {backend_name}  metric: {metric}")
@@ -453,6 +479,8 @@ def run_domain(
             task_suite=suite,
             max_generations=max_generations,
             metric=metric,
+            synthesizer=synthesizer,
+            memory_store_path=memory_store_path,
             on_generation=_stream_generation if stream else None,
         )
     except LoopStalled as error:
@@ -460,6 +488,9 @@ def run_domain(
 
     if stream:
         _print(_render_lineage_summary(report))
+        if report.memory_store is not None and len(report.memory_store) > 0:
+            _print()
+            _print(report.memory_growth_table())
 
     if output_path is not None:
         out_dict = export_lineage_to_dict(
@@ -479,7 +510,12 @@ def run_domain(
     # but the numbers shown to a human come from the measurement harness, with
     # its guards (no accuracy without cost, no improvement without a before
     # number, undefined never rendered as zero) intact.
-    runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
+    runner = TrajectoryRunner(
+        backend=backend,
+        tool_runtime=tool_runtime,
+        evaluator=evaluator,
+        memory_store=report.memory_store,
+    )
     task_runner = runner.as_task_runner()
     measurement = Evaluator([suite], evaluators={domain: evaluator}, repeats=repeats)
     baseline_report = measurement.run_iteration(0, report.root_spec, task_runner)
@@ -518,6 +554,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default="scripted",
         help="scripted: deterministic stand-in, no API key needed. "
         "anthropic: a real model, requires ANTHROPIC_API_KEY (default: scripted)",
+    )
+    run_parser.add_argument(
+        "--memory",
+        choices=("full_transcript", "episodic_store"),
+        default=None,
+        help="initial memory kind (default: full_transcript, or episodic_store for persistent memory)",
+    )
+    run_parser.add_argument(
+        "--memory-store",
+        type=str,
+        default=None,
+        help="optional file path to persist episodic memory store (JSON)",
     )
     run_parser.add_argument(
         "--repeats",
@@ -576,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
             repeats=args.repeats,
             stream=not args.quiet,
             output_path=args.output,
+            memory=args.memory,
+            memory_store_path=args.memory_store,
         )
         return 0
 
