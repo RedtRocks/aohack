@@ -21,12 +21,14 @@ def _fmt_metric(metric: dict, unit: str = "") -> str:
 
 def render(data: dict) -> str:
     lines = [
-        "# code_math x GPT-5 nano: a real-model run through the engine loop",
+        "# code_math x a real model: a live run through the engine loop",
         "",
-        f"Model: `{data['model']}` &middot; domain: `{data['domain']}` &middot; "
-        f"{data['task_count']} tasks &middot; **{data['real_model_calls_made']} real API calls made**",
+        f"Primary model: `{data['primary_model']}` &middot; fallback: `{data['fallback_model']}` "
+        f"&middot; domain: `{data['domain']}` &middot; {data['task_count']} tasks &middot; "
+        f"**{data['real_model_calls_made']} real API calls made** "
+        f"({data['primary_calls']} primary / {data['fallback_calls']} fallback)",
         "",
-        "GPT-5 nano was chosen deliberately, not as a fallback: a strong baseline agent "
+        "A weak model was chosen deliberately, not as a fallback: a strong baseline agent "
         "leaves the loop no headroom, so every mutation lands in the noise. A weak model "
         "gives a low baseline with real room to improve, and it is cheap and fast enough "
         "to run several times per task so run-to-run variance means something.",
