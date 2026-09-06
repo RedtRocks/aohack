@@ -126,11 +126,22 @@ def test_loop_runs_end_to_end_and_produces_a_lineage():
     assert report.final_spec.spec_id != report.root_spec.spec_id
 
 
-def test_lineage_of_three_mutations_each_carrying_before_and_delta():
-    """The integration-gate shape: >=3 mutations, each accepted-or-rejected with before+delta."""
+def test_lineage_of_two_mutations_then_an_honest_stall():
+    """The integration-gate shape: every ladder move tried gets accepted-or-rejected
+    with before+delta, and the loop stops the instant the ladder for the
+    diagnosed cause runs out, rather than reaching for an unrelated edit to
+    keep generating.
+
+    A backend that always misuses the tool the same way exhausts the
+    tool-misuse ladder -- prompt guidance, then a loop-shape escalation -- in
+    exactly two generations. There is deliberately no third generation: the
+    ladder does not fall back to a step-budget raise or a memory change for a
+    cause neither addresses, so the run stalls honestly instead of padding the
+    lineage with a mutation whose rationale would not actually be true.
+    """
 
     class _NeverLearningBackend:
-        """Always calls the wrong key; never improves, so the ladder keeps escalating."""
+        """Always calls the wrong key; never improves, so nothing here is ever accepted."""
 
         def next_action(self, spec, task, tools, history):
             if not history:
@@ -148,7 +159,7 @@ def test_lineage_of_three_mutations_each_carrying_before_and_delta():
         max_generations=5,
     )
 
-    assert len(report.generations) >= 3
+    assert len(report.generations) == 2  # the tool-misuse ladder has exactly two honest moves
     for record in report.generations:
         assert record.verdict.decision.value in {"accepted", "reverted"}
         assert record.verdict.before == 0.0

@@ -33,6 +33,9 @@ def render(data: dict) -> str:
         "gives a low baseline with real room to improve, and it is cheap and fast enough "
         "to run several times per task so run-to-run variance means something.",
         "",
+        f"**Baseline synthesizer: `{data.get('baseline_synthesizer', 'template')}`.** "
+        f"{data.get('baseline_statement', '')}",
+        "",
         "## Noise floor",
         "",
         f"The root spec was run through the real suite {data['noise_floor']['replicates']} "
@@ -78,6 +81,15 @@ def render(data: dict) -> str:
             f"{record['before']:.4f} | {record['after']:.4f} | {record['delta']:+.4f} | "
             f"{record['decision']} | {'yes' if record['within_noise_floor'] else 'no'} |"
         )
+    kind_counts: dict[str, int] = {}
+    for record in data["lineage"]:
+        kind_counts[record["mutation_kind"]] = kind_counts.get(record["mutation_kind"], 0) + 1
+    lines += ["", "## Mutation-kind distribution", ""]
+    if kind_counts:
+        for kind, count in sorted(kind_counts.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- `{kind}`: {count}")
+    else:
+        lines.append("(no mutations were attempted)")
     lines += ["", "Rationale behind each proposed mutation:", ""]
     for record in data["lineage"]:
         lines.append(f"- **gen {record['generation']}** ({record['decision']}): {record['rationale']}")

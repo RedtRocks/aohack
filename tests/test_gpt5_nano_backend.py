@@ -29,6 +29,7 @@ from gpt5_nano_backend import (  # noqa: E402
 )
 
 from agent_engineer.ports import AgentAction  # noqa: E402
+from agent_engineer.schemas import OrchestrationStrategy  # noqa: E402
 
 
 class _Task:
@@ -38,9 +39,15 @@ class _Task:
 
 
 class _Spec:
-    def __init__(self, system_prompt: str, spec_id: str = "spec-1") -> None:
+    def __init__(
+        self,
+        system_prompt: str,
+        spec_id: str = "spec-1",
+        strategy: OrchestrationStrategy = OrchestrationStrategy.REACT,
+    ) -> None:
         self.system_prompt = system_prompt
         self.spec_id = spec_id
+        self.strategy = strategy
 
 
 def _fake_response(*, content: str, prompt_tokens: int = 12, completion_tokens: int = 7) -> Mock:
@@ -284,3 +291,73 @@ def test_caching_backend_survives_a_rerun_by_reloading_the_cache_file(tmp_path):
 
     assert stub_two.calls_made == 0
     assert replayed.final_answer == "answer-for-task-a-1"
+
+
+def test_plan_then_execute_makes_two_real_calls_and_uses_the_plan(monkeypatch):
+    """PLAN_THEN_EXECUTE must not be a no-op: it makes two provider calls, and
+    the second one is given the first one's plan, not just the bare task."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    backend = GPT5NanoBackend()
+
+    responses = [
+        _fake_response(content="1. read the number\n2. double it", prompt_tokens=10, completion_tokens=8),
+        _fake_response(content="42", prompt_tokens=20, completion_tokens=2),
+    ]
+    post = Mock(side_effect=responses)
+    monkeypatch.setattr("gpt5_nano_backend.requests.post", post)
+
+    spec = _Spec("system text", strategy=OrchestrationStrategy.PLAN_THEN_EXECUTE)
+    action = backend.next_action(spec, _Task("double 21"), (), ())
+
+    assert post.call_count == 2
+    assert action.final_answer == "42"
+    # token usage from both calls is reported, not just the last one
+    assert action.prompt_tokens == 30
+    assert action.completion_tokens == 10
+
+    plan_call_body = post.call_args_list[0].kwargs["json"]
+    answer_call_body = post.call_args_list[1].kwargs["json"]
+    assert "double 21" in plan_call_body["messages"][1]["content"]
+    assert "Do not answer yet" in plan_call_body["messages"][1]["content"]
+    # the second call actually carries the first call's plan forward
+    assert "double it" in answer_call_body["messages"][1]["content"]
+
+
+def test_reflexion_makes_two_real_calls_and_can_revise_the_draft(monkeypatch):
+    """REFLEXION must not be a no-op either: the second call is shown the first
+    call's own draft and can replace it -- a genuine retry-on-format-failure."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    backend = GPT5NanoBackend()
+
+    responses = [
+        _fake_response(content="The answer is 42.", prompt_tokens=10, completion_tokens=8),
+        _fake_response(content="42", prompt_tokens=15, completion_tokens=1),
+    ]
+    post = Mock(side_effect=responses)
+    monkeypatch.setattr("gpt5_nano_backend.requests.post", post)
+
+    spec = _Spec("system text", strategy=OrchestrationStrategy.REFLEXION)
+    action = backend.next_action(spec, _Task("double 21, answer with just the number"), (), ())
+
+    assert post.call_count == 2
+    assert action.final_answer == "42"
+    assert action.prompt_tokens == 25
+    assert action.completion_tokens == 9
+
+    revise_call_body = post.call_args_list[1].kwargs["json"]
+    assert "The answer is 42." in revise_call_body["messages"][1]["content"]
+
+
+def test_single_shot_and_react_still_make_exactly_one_call(monkeypatch):
+    """Every strategy this backend does not implement distinctly still makes
+    exactly one call -- it must not silently upgrade behaviour it cannot back."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-real-key")
+    backend = GPT5NanoBackend()
+    post = Mock(return_value=_fake_response(content="ok"))
+    monkeypatch.setattr("gpt5_nano_backend.requests.post", post)
+
+    for strategy in (OrchestrationStrategy.SINGLE_SHOT, OrchestrationStrategy.REACT):
+        post.reset_mock()
+        action = backend.next_action(_Spec("s", strategy=strategy), _Task("u"), (), ())
+        assert post.call_count == 1
+        assert action.final_answer == "ok"

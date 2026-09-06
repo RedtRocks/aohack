@@ -64,6 +64,13 @@ from agent_engineer.evaluation import DomainSuite, Evaluator  # noqa: E402
 from agent_engineer.evaluation.metrics import population_variance  # noqa: E402
 from agent_engineer.loop import run_loop  # noqa: E402
 from agent_engineer.ports import ToolResult, ToolSchema  # noqa: E402
+from agent_engineer.schemas import (  # noqa: E402
+    AgentSpec,
+    MemoryConfig,
+    MemoryKind,
+    OrchestrationStrategy,
+    StoppingConditions,
+)
 from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner  # noqa: E402
 from agent_engineer.stages.select import MinimumDeltaPolicy  # noqa: E402
 from agent_engineer.stages.synthesize import TemplateSynthesizer  # noqa: E402
@@ -96,6 +103,41 @@ class _NoTools:
 
     def invoke(self, task, tool_name: str, args: dict) -> ToolResult:  # pragma: no cover
         return ToolResult(error=f"code_math exposes no tools; got {tool_name!r}")
+
+
+NAIVE_BASELINE_STATEMENT = (
+    "We start from a naive baseline so that improvement is measurable. "
+    "Generation zero is a bare system prompt (the goal string, verbatim, and "
+    "nothing else -- no tool listing, no worked examples, no 'how to work' "
+    "scaffolding), single_shot strategy, memory kind none, and a minimal "
+    "one-step stopping condition. This is a deliberate experimental choice, "
+    "not the strongest agent we could build: TemplateSynthesizer's own default "
+    "prompt already tells the model to check tool errors and stop only once "
+    "complete, which leaves little headroom for the loop's early mutations to "
+    "visibly improve on. This baseline is weaker on purpose."
+)
+
+
+class _NaiveSynthesizer:
+    """The deliberately weakest defensible starting agent.
+
+    See :data:`NAIVE_BASELINE_STATEMENT` -- this exists so that generation
+    zero has real room for the loop to gain, and its use is declared in the
+    artifact and in this module rather than silently substituted for the
+    engine's own default.
+    """
+
+    def synthesize(self, *, spec_id, goal, tools, evaluator_id, criteria=""):
+        del tools, evaluator_id, criteria  # the naive prompt names none of this
+        if not goal.strip():
+            raise ValueError("goal must not be blank")
+        return AgentSpec(
+            spec_id=spec_id,
+            system_prompt=goal.strip(),
+            strategy=OrchestrationStrategy.SINGLE_SHOT,
+            memory=MemoryConfig(kind=MemoryKind.NONE),
+            stopping=StoppingConditions(max_steps=1),
+        )
 
 
 class _FixedSpecSynthesizer:
@@ -185,6 +227,19 @@ def main() -> None:
         action="store_true",
         help="Run 3-task pilot with repeats=3, 1 generation and verify tokens/elapsed_seconds",
     )
+    parser.add_argument(
+        "--baseline",
+        choices=["template", "naive"],
+        default="template",
+        help=(
+            "Generation-zero synthesizer. 'template' (default) is the engine's own "
+            "TemplateSynthesizer -- a competent starting agent. 'naive' is the "
+            "deliberately weakest defensible starting agent (see "
+            "NAIVE_BASELINE_STATEMENT): a bare system prompt, single_shot strategy, "
+            "no memory, one-step stopping. Declared explicitly because it changes "
+            "what 'improvement' means for the resulting lineage."
+        ),
+    )
     args = parser.parse_args()
 
     domain = args.domain
@@ -224,7 +279,12 @@ def main() -> None:
     runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
     harness = Evaluator([suite], evaluators={domain: evaluator}, repeats=repeats)
 
-    root_spec = TemplateSynthesizer().synthesize(
+    if args.baseline == "naive":
+        print(f"NAIVE BASELINE: {NAIVE_BASELINE_STATEMENT}", flush=True)
+        synthesizer = _NaiveSynthesizer()
+    else:
+        synthesizer = TemplateSynthesizer()
+    root_spec = synthesizer.synthesize(
         spec_id=spec_id, goal=GOAL, tools=tool_runtime.schemas(), evaluator_id=evaluator_id
     )
 
@@ -311,6 +371,12 @@ def main() -> None:
         "domain": domain,
         "spec_id": spec_id,
         "goal": GOAL,
+        "baseline_synthesizer": args.baseline,
+        "baseline_statement": (
+            NAIVE_BASELINE_STATEMENT if args.baseline == "naive" else
+            "Generation zero used TemplateSynthesizer's competent default prompt, "
+            "not a naive baseline."
+        ),
         "task_count": len(suite.tasks),
         "real_model_calls_made": backend.calls_made,
         "cumulative_tokens": backend.total_tokens,

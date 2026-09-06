@@ -63,7 +63,7 @@ class Mutator(Protocol):
         *,
         mutation_id: str,
         child_spec_id: str,
-        already_tried: frozenset[tuple[str, str]] = frozenset(),
+        already_tried: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> tuple[Mutation, AgentSpec] | None: ...
 
 
@@ -336,15 +336,22 @@ def _move_reorder_tools(
 
 
 LADDERS: dict[FailureCause, tuple[Move, ...]] = {
+    # Reaching for the wrong tool, or none at all: presentation order first
+    # (cheapest lever on selection), then the loop shape.
     FailureCause.WRONG_TOOL_SELECTED: (
         _move_prompt_guidance,
         _move_reorder_tools,
         _move_escalate_strategy,
     ),
+    # Calling the right tool wrong: behavioural guidance on argument-checking
+    # first, then a loop shape that gives the model a deliberate step before
+    # each call. There is deliberately no third move here that is not
+    # actually about how a tool is called -- a step-budget raise or a memory
+    # change does not address malformed arguments, and proposing one anyway
+    # is exactly the diagnosis-mutation mismatch this ladder used to have.
     FailureCause.TOOL_MISUSE: (
         _move_prompt_guidance,
         _move_escalate_strategy,
-        _move_raise_step_budget,
     ),
     FailureCause.FAULTY_REASONING: (
         _move_prompt_guidance,
@@ -367,25 +374,40 @@ LADDERS: dict[FailureCause, tuple[Move, ...]] = {
         _move_prompt_guidance,
         _move_retain_full_context,
     ),
+    # Output shape, not content: guidance on the required form, then a loop
+    # shape (REFLEXION) that gives the model an explicit self-check-and-revise
+    # step before the answer is final -- a genuine retry-on-format-failure,
+    # not a tool-order or step-budget move that has nothing to do with shape.
     FailureCause.OUTPUT_FORMAT_VIOLATION: (
         _move_prompt_guidance,
         _move_escalate_strategy,
-        _move_reorder_tools,
     ),
 }
-"""Per-cause escalation ladders, cheapest and most targeted move first."""
+"""Per-cause escalation ladders, cheapest and most targeted move first.
+
+Every move on every ladder must be one whose rationale is actually true of
+the cause it is listed under. A move that is only honest for a different
+cause does not belong here, even as a last resort -- see the module
+docstring and the `_FALLBACK_LADDER` note below.
+"""
 
 _FALLBACK_LADDER: tuple[Move, ...] = (
     _move_prompt_guidance,
     _move_escalate_strategy,
-    _move_raise_step_budget,
-    _move_retain_full_context,
-    _move_add_episodic_store,
-    _move_add_retrieval,
-    _move_reorder_tools,
-    _move_require_final_answer,
 )
-"""Tried after a cause's own ladder is exhausted, so the loop keeps making moves."""
+"""Tried after a cause's own ladder is exhausted.
+
+Deliberately short, and deliberately cause-agnostic in truth, not just in
+applicability: prompt guidance and a loop-shape escalation are legitimate
+responses to *any* behavioural cause. The moves that used to live here --
+raising the step budget, changing memory, reordering tools -- each carry a
+rationale that asserts something specific to a *different* cause (a budget
+cut-off, context loss, wrong-tool selection). Firing one of them for a cause
+it was never diagnosed for is not a fallback, it is the loop making an
+unrelated edit and reporting it as reasoned. When both moves here are
+exhausted the mutator returns ``None`` and the lineage ends honestly, which
+is the documented behaviour an exhausted ladder is supposed to produce.
+"""
 
 
 class LadderMutator:
@@ -401,7 +423,7 @@ class LadderMutator:
         *,
         mutation_id: str,
         child_spec_id: str,
-        already_tried: frozenset[tuple[str, str]] = frozenset(),
+        already_tried: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> tuple[Mutation, AgentSpec] | None:
         """Emit one mutation aimed at the dominant cause, plus the spec it produces.
 
@@ -420,7 +442,7 @@ class LadderMutator:
             proposal = move(spec, diagnosis, child_spec_id)
             if proposal is None or proposal.before == proposal.after:
                 continue
-            if (proposal.kind.value, proposal.target_path) in already_tried:
+            if (proposal.kind.value, proposal.target_path, proposal.after) in already_tried:
                 continue
             mutation = Mutation(
                 mutation_id=mutation_id,
@@ -444,7 +466,7 @@ class LadderMutator:
         *,
         mutation_id: str,
         child_spec_id: str,
-        already_tried: frozenset[tuple[str, str]] = frozenset(),
+        already_tried: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> Mutation | None:
         """As :meth:`propose_with_child`, discarding the child spec."""
         proposed = self.propose_with_child(
