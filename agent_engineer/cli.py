@@ -108,7 +108,7 @@ class ScriptedBackend:
         tier = self._tier(spec.spec_id)
         prompt_text = getattr(spec, "system_prompt", "") or ""
         memory_count = prompt_text.count("- [SUCCESS]") + prompt_text.count("- [FAILURE LESSON]")
-        solved_slots = self._base + self._step * tier + memory_count * 2
+        solved_slots = self._base + self._step * tier
         # Deterministic per-task admission, independent of Python's randomized
         # str hash (PYTHONHASHSEED): a fixed digest of the task id, stable
         # across processes and across runs, so the same tier always admits the
