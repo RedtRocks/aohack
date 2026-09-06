@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import time
 
@@ -19,23 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _ensure_api_keys() -> None:
-    if os.environ.get("TENSORMUX_API_KEY") and os.environ.get("OPENAI_API_KEY"):
-        return
-    import sqlite3
-
-    db_path = Path.home() / ".ao" / "data" / "ao.db"
-    if db_path.is_file():
-        conn = sqlite3.connect(str(db_path))
-        for (text,) in conn.execute(
-            "SELECT text FROM conversation_messages WHERE text LIKE '%tmx_%'"
-        ):
-            m_tmx = re.search(r"tmx_[a-zA-Z0-9]+", text)
-            m_oa = re.search(r"sk-proj-[a-zA-Z0-9_\-]+", text)
-            if m_tmx and not os.environ.get("TENSORMUX_API_KEY"):
-                os.environ["TENSORMUX_API_KEY"] = m_tmx.group(0)
-            if m_oa and not os.environ.get("OPENAI_API_KEY"):
-                os.environ["OPENAI_API_KEY"] = m_oa.group(0)
-        conn.close()
+    for key in ("TENSORMUX_API_KEY", "OPENAI_API_KEY"):
+        if not os.environ.get(key):
+            raise RuntimeError(f"Missing required environment variable: {key}. Please export it.")
 
 
 _ensure_api_keys()
