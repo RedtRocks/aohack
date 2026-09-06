@@ -85,23 +85,36 @@ def main() -> None:
     # Load .env if present before checking os.environ
     _load_env(REPO_ROOT / ".env")
 
-    # 1. Verify required environment variables from os.environ ONLY
-    for key in ("TENSORMUX_API_KEY", "OPENAI_API_KEY"):
-        if not os.environ.get(key):
-            print(f"Missing required environment variable: {key}. Please export it.", flush=True)
-            sys.exit(1)
+    # Require at least one API key; TensorMux is primary, OpenAI is fallback
+    has_tmx = bool(os.environ.get("TENSORMUX_API_KEY"))
+    has_oa = bool(os.environ.get("OPENAI_API_KEY"))
 
-    # 1. Header naming model and endpoint
-    print("model: glm-4-7-flash via https://api.tensormux.com/v1", flush=True)
+    if not has_tmx and not has_oa:
+        print(
+            "Missing API keys: please set TENSORMUX_API_KEY or OPENAI_API_KEY (see .env.example).",
+            flush=True,
+        )
+        sys.exit(1)
+
+    # 1. Header naming model, endpoint, and fallback status
+    if has_tmx:
+        primary = TensorMuxGLMBackend(max_tokens=MAX_TOKENS)
+        print("model: glm-4-7-flash via https://api.tensormux.com/v1", flush=True)
+        if has_oa:
+            secondary = GPT5NanoBackend(max_tokens=MAX_TOKENS)
+            live_backend = FallbackBackend(primary, secondary)
+            print("fallback: gpt-5-nano (configured)", flush=True)
+        else:
+            live_backend = primary
+            print("fallback: none configured", flush=True)
+    else:
+        live_backend = GPT5NanoBackend(max_tokens=MAX_TOKENS)
+        print("model: gpt-5-nano via https://api.openai.com/v1", flush=True)
+        print("fallback: none configured", flush=True)
     print(flush=True)
 
     suite = get_suite()
     evaluator = get_evaluator()
-
-    # Backends
-    primary = TensorMuxGLMBackend(max_tokens=MAX_TOKENS)
-    secondary = GPT5NanoBackend(max_tokens=MAX_TOKENS)
-    fallback = FallbackBackend(primary, secondary)
 
     # 2. ONE real task from code_math suite
     first_task = suite.tasks[0]
@@ -121,7 +134,7 @@ def main() -> None:
 
     # 3. 'calling live API...' then REAL RESPONSE TEXT (uncached first call)
     print("calling live API...", flush=True)
-    action = fallback.next_action(root_spec, first_task, (), ())
+    action = live_backend.next_action(root_spec, first_task, (), ())
     raw_response = (action.final_answer or "").strip()
     truncated_response = raw_response[:300] + ("..." if len(raw_response) > 300 else "")
     print(f"model response:\n{truncated_response}", flush=True)
@@ -153,7 +166,7 @@ def main() -> None:
 
     # 6. SHORT loop: 3 tasks, 1 generation, repeats=2
     spend_cap = int(os.environ.get("SPEND_CAP_TOKENS", DEFAULT_SPEND_CAP_TOKENS))
-    caching_backend = CachingBackend(fallback, cache_path=CACHE_PATH)
+    caching_backend = CachingBackend(live_backend, cache_path=CACHE_PATH)
     metering_backend = MeteringBackend(caching_backend, max_total_tokens=spend_cap, log=lambda _: None)
 
     # 3 tasks: includes code tasks and a math task with a trap to exercise diagnose & mutate
@@ -203,6 +216,17 @@ def main() -> None:
         f"({selection_verdict.before:.2f} -> {selection_verdict.after:.2f}, delta {selection_verdict.delta:+.2f})",
         flush=True,
     )
+    if selection_verdict.decision.value == "reverted":
+        print(
+            "kept the baseline: the change did not beat the measured noise floor, "
+            "so it was not accepted as an improvement.",
+            flush=True,
+        )
+    else:
+        print(
+            "accepted the mutation: the change beat the noise floor and measurably improved performance.",
+            flush=True,
+        )
     print(flush=True)
 
     # 7. Final line: total real API calls made and total tokens spent
