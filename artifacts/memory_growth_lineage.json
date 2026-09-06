@@ -1,0 +1,188 @@
+{
+  "label": "Lineage run on domain code_math",
+  "backend": "scripted",
+  "domain": "code_math",
+  "task_count": 16,
+  "noise_floor": {
+    "source": "measured automatically by agent_engineer.loop.run_loop's own default (Evaluator, repeats=3, on the root spec)",
+    "reliability_variance": 1e-18,
+    "reliability_std": 1e-09
+  },
+  "selection_policy": "run_loop default (noise-aware keep threshold)",
+  "root_spec_id": "code_math-agent",
+  "final_spec_id": "code_math-agent-g3",
+  "memory_growth_table": "=== Episodic Memory Growth Across Iterations ===\nIteration     Memory Size  Accuracy          Cost / Task           Verdict \n------------  -----------  ----------------  --------------------  --------\ngen 0 (root)  0 entries    0.1875            41.9 tok              baseline\ngen 1         25 entries   0.7500 (+0.5625)  71.5 tok (+29.6 tok)  ACCEPTED\ngen 2         27 entries   0.8750 (+0.1250)  72.8 tok (+30.9 tok)  ACCEPTED\ngen 3         29 entries   1.0000 (+0.1250)  74.0 tok (+32.1 tok)  ACCEPTED\n-------------------------------------------------\nSummary: Memory: 0 -> 29 entries (+29) | Accuracy: 0.1875 -> 1.0000 (+0.8125) | Cost: 41.9 tok -> 74.0 tok (+32.1 tok)",
+  "lineage": [
+    {
+      "generation": 1,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "system_prompt_rewrite",
+      "target_path": "system_prompt",
+      "rationale": "The dominant cause is premature_stop. Adding explicit behavioural guidance for it is the smallest edit that can change the agent's conduct at the step where it fails.",
+      "before": 0.1875,
+      "after": 0.75,
+      "delta": 0.5625,
+      "decision": "accepted",
+      "reason": "measured 0.1875 -> 0.7500 (delta +0.5625), which clears the 1e-09 keep threshold",
+      "spec_before": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.",
+        "tools": [],
+        "strategy": "react",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 8,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": null
+      },
+      "spec_after": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent-g1",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.\n\nCorrection, from observed failures attributed to premature_stop:\nBefore answering, check whether any part of the task is still unverified. If it is, keep working -- you have budget remaining. Answer only when every part of the request is covered.\nWhat went wrong on the last run:\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n",
+        "tools": [],
+        "strategy": "react",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 8,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": "code_math-agent"
+      },
+      "memory_store_size": 25
+    },
+    {
+      "generation": 2,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "strategy_changed",
+      "target_path": "strategy",
+      "rationale": "Prompt-level guidance did not fix premature_stop, so the loop shape is the constraint: plan_then_execute gives the agent an explicit step for the deliberation it is currently skipping.",
+      "before": 0.75,
+      "after": 0.875,
+      "delta": 0.125,
+      "decision": "accepted",
+      "reason": "measured 0.7500 -> 0.8750 (delta +0.1250), which clears the 1e-09 keep threshold",
+      "spec_before": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent-g1",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.\n\nCorrection, from observed failures attributed to premature_stop:\nBefore answering, check whether any part of the task is still unverified. If it is, keep working -- you have budget remaining. Answer only when every part of the request is covered.\nWhat went wrong on the last run:\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n",
+        "tools": [],
+        "strategy": "react",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 8,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": "code_math-agent"
+      },
+      "spec_after": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent-g2",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.\n\nCorrection, from observed failures attributed to premature_stop:\nBefore answering, check whether any part of the task is still unverified. If it is, keep working -- you have budget remaining. Answer only when every part of the request is covered.\nWhat went wrong on the last run:\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n",
+        "tools": [],
+        "strategy": "plan_then_execute",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 8,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": "code_math-agent-g1"
+      },
+      "memory_store_size": 27
+    },
+    {
+      "generation": 3,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "stopping_adjusted",
+      "target_path": "stopping.max_steps",
+      "rationale": "Runs are being cut off at 8 steps before finishing, so the budget is binding on the outcome rather than the agent's competence. Doubling it separates the two.",
+      "before": 0.875,
+      "after": 1.0,
+      "delta": 0.125,
+      "decision": "accepted",
+      "reason": "measured 0.8750 -> 1.0000 (delta +0.1250), which clears the 1e-09 keep threshold",
+      "spec_before": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent-g2",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.\n\nCorrection, from observed failures attributed to premature_stop:\nBefore answering, check whether any part of the task is still unverified. If it is, keep working -- you have budget remaining. Answer only when every part of the request is covered.\nWhat went wrong on the last run:\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n",
+        "tools": [],
+        "strategy": "plan_then_execute",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 8,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": "code_math-agent-g1"
+      },
+      "spec_after": {
+        "schema_name": "AgentSpec",
+        "schema_version": 1,
+        "spec_id": "code_math-agent-g3",
+        "system_prompt": "You are an autonomous agent. Your goal, stated by the operator, is:\nSolve every task in the 'code_math' suite.\n\nAvailable tools:\n(none -- answer directly)\n\nHow to work:\n- At each step either call exactly one of the listed tools or give your final answer.\n- Never call a tool that is not listed above, and never invent its results.\n- Read each tool result before deciding the next step; if a call errors, fix the arguments rather than repeating it unchanged.\n- Stop as soon as you can support a complete answer, and not before.\n\nYour final answer is judged by evaluator 'code_math.cli-run'.\n\nCorrection, from observed failures attributed to premature_stop:\nBefore answering, check whether any part of the task is still unverified. If it is, keep working -- you have budget remaining. Answer only when every part of the request is covered.\nWhat went wrong on the last run:\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n- answered after 0 of an available 8 steps, leaving most of the budget unused\n",
+        "tools": [],
+        "strategy": "plan_then_execute",
+        "memory": {
+          "kind": "episodic_store",
+          "max_tokens": null,
+          "retrieval_k": 3,
+          "persist_across_runs": true
+        },
+        "stopping": {
+          "max_steps": 16,
+          "max_tokens": null,
+          "max_wall_clock_seconds": null,
+          "stop_on_tools": [],
+          "require_final_answer": true
+        },
+        "parent_spec_id": "code_math-agent-g2"
+      },
+      "memory_store_size": 29
+    }
+  ]
+}

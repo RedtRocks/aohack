@@ -243,6 +243,31 @@ def _move_retain_full_context(
     )
 
 
+def _move_add_episodic_store(
+    spec: AgentSpec, diagnosis: Diagnosis, child_spec_id: str
+) -> Proposal | None:
+    if spec.memory.kind is MemoryKind.EPISODIC_STORE and spec.memory.persist_across_runs:
+        return None
+    memory = MemoryConfig(
+        kind=MemoryKind.EPISODIC_STORE,
+        max_tokens=spec.memory.max_tokens,
+        retrieval_k=spec.memory.retrieval_k or DEFAULT_RETRIEVAL_K,
+        persist_across_runs=True,
+    )
+    return Proposal(
+        kind=MutationKind.MEMORY_RECONFIGURED,
+        target_path="memory.kind",
+        before=spec.memory.kind.value,
+        after=memory.kind.value,
+        rationale=(
+            "Prior run experience and failure lessons were lost between iterations. Configuring "
+            f"an episodic store with retrieval_k={memory.retrieval_k} and persist_across_runs=True "
+            "allows the agent to accumulate and retrieve distilled memory across runs."
+        ),
+        child=_child(spec, child_spec_id, memory=memory),
+    )
+
+
 def _move_add_retrieval(
     spec: AgentSpec, diagnosis: Diagnosis, child_spec_id: str
 ) -> Proposal | None:
@@ -329,6 +354,7 @@ LADDERS: dict[FailureCause, tuple[Move, ...]] = {
     FailureCause.CONTEXT_LOSS: (
         _move_retain_full_context,
         _move_prompt_guidance,
+        _move_add_episodic_store,
         _move_add_retrieval,
     ),
     FailureCause.PREMATURE_STOP: (
@@ -354,6 +380,7 @@ _FALLBACK_LADDER: tuple[Move, ...] = (
     _move_escalate_strategy,
     _move_raise_step_budget,
     _move_retain_full_context,
+    _move_add_episodic_store,
     _move_add_retrieval,
     _move_reorder_tools,
     _move_require_final_answer,

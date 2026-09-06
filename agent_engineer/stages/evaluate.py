@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from typing import TYPE_CHECKING
+
 from agent_engineer.ports import (
     AgentAction,
     DomainSuite,
@@ -31,7 +33,10 @@ from agent_engineer.ports import (
     TaskSpec,
     ToolRuntime,
 )
-from agent_engineer.schemas import AgentSpec, TokenUsage, ToolCall, Trajectory
+from agent_engineer.schemas import AgentSpec, MemoryKind, TokenUsage, ToolCall, Trajectory
+
+if TYPE_CHECKING:
+    from agent_engineer.memory import EpisodicMemoryStore
 
 RESULT_CLIP_CHARS = 4000
 
@@ -118,11 +123,20 @@ class TrajectoryRunner:
     """Runs specs against tasks and hands each finished run to the evaluator."""
 
     def __init__(
-        self, backend: ModelBackend, tool_runtime: ToolRuntime, evaluator: TaskEvaluator
+        self,
+        backend: ModelBackend,
+        tool_runtime: ToolRuntime,
+        evaluator: TaskEvaluator,
+        memory_store: EpisodicMemoryStore | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tool_runtime
         self._evaluator = evaluator
+        self._memory_store = memory_store
+
+    @property
+    def memory_store(self) -> EpisodicMemoryStore | None:
+        return self._memory_store
 
     def run_task(
         self, spec: AgentSpec, task: TaskSpec, *, trajectory_id: str | None = None
@@ -137,6 +151,20 @@ class TrajectoryRunner:
         completion_tokens = 0
         final_answer: str | None = None
         stop_reason = StopReason.MAX_STEPS
+
+        effective_spec = spec
+        if (
+            self._memory_store is not None
+            and spec.memory.kind is MemoryKind.EPISODIC_STORE
+            and spec.memory.persist_across_runs
+            and len(self._memory_store) > 0
+        ):
+            k = spec.memory.retrieval_k or 3
+            entries = self._memory_store.retrieve(task.prompt, k=k)
+            if entries:
+                context_block = self._memory_store.format_for_context(entries)
+                effective_prompt = f"{spec.system_prompt.rstrip()}\n\n{context_block}\n"
+                effective_spec = spec.model_copy(update={"system_prompt": effective_prompt})
 
         while True:
             elapsed = time.monotonic() - started
@@ -155,7 +183,7 @@ class TrajectoryRunner:
                 break
 
             try:
-                action = self._backend.next_action(spec, task, schemas, tuple(calls))
+                action = self._backend.next_action(effective_spec, task, schemas, tuple(calls))
             except Exception as error:  # a backend fault is a run outcome, not a crash
                 calls.append(
                     ToolCall(

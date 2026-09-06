@@ -33,11 +33,13 @@ measurement entirely -- no surprise extra calls for a caller who opts out.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from agent_engineer.evaluation import Evaluator
+from agent_engineer.memory import EpisodicMemoryStore, HeuristicReflector, Reflector
 from agent_engineer.ports import DomainSuite, ModelBackend, TaskEvaluator, ToolRuntime
-from agent_engineer.schemas import AgentSpec, Diagnosis, Mutation
+from agent_engineer.schemas import AgentSpec, Diagnosis, MemoryKind, Mutation
 from agent_engineer.stages.diagnose import Diagnoser, HeuristicDiagnoser
 from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner
 from agent_engineer.stages.mutate import LadderMutator, Mutator
@@ -86,6 +88,7 @@ class GenerationRecord:
     verdict: Verdict
     spec_before: AgentSpec
     spec_after: AgentSpec
+    memory_store_size: int = 0
 
     @property
     def accepted(self) -> bool:
@@ -99,6 +102,7 @@ class LineageReport:
     root_spec: AgentSpec
     generations: tuple[GenerationRecord, ...]
     noise_floor: float | None = None
+    memory_store: EpisodicMemoryStore | None = None
     """The keep threshold actually used, when derived automatically from a measured
     reliability variance (see the module docstring). ``None`` when the caller
     supplied their own ``selection_policy`` -- the derivation never ran, so there
@@ -134,6 +138,72 @@ class LineageReport:
             )
         return tuple(lines)
 
+    def memory_growth_table(self) -> str:
+        """Render a table across iterations showing memory store size, accuracy, and cost per task."""
+        if not self.generations:
+            return "No generations recorded."
+
+        gen0_run = self.generations[0].evaluation_before
+        gen0_trajs = gen0_run.trajectories
+        gen0_cost = (
+            sum(t.tokens.total_tokens for t in gen0_trajs) / max(1, len(gen0_trajs))
+        )
+        gen0_acc = gen0_run.pass_rate
+
+        headers = ["Iteration", "Memory Size", "Accuracy", "Cost / Task", "Verdict"]
+        rows: list[list[str]] = [
+            ["gen 0 (root)", "0 entries", f"{gen0_acc:.4f}", f"{gen0_cost:.1f} tok", "baseline"]
+        ]
+
+        for record in self.generations:
+            after_run = record.evaluation_after
+            after_trajs = after_run.trajectories
+            after_cost = (
+                sum(t.tokens.total_tokens for t in after_trajs) / max(1, len(after_trajs))
+            )
+            after_acc = after_run.pass_rate
+            decision = "ACCEPTED" if record.accepted else "REVERTED"
+            acc_delta = after_acc - record.verdict.before
+            cost_delta = after_cost - gen0_cost
+            rows.append(
+                [
+                    f"gen {record.generation}",
+                    f"{record.memory_store_size} entries",
+                    f"{after_acc:.4f} ({acc_delta:+.4f})",
+                    f"{after_cost:.1f} tok ({cost_delta:+.1f} tok)",
+                    decision,
+                ]
+            )
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for idx, cell in enumerate(row):
+                widths[idx] = max(widths[idx], len(cell))
+
+        lines = [
+            "=== Episodic Memory Growth Across Iterations ===",
+            "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)),
+            "  ".join("-" * widths[i] for i in range(len(headers))),
+        ]
+        for row in rows:
+            lines.append("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+
+        last_rec = self.generations[-1]
+        last_trajs = last_rec.evaluation_after.trajectories
+        last_cost = (
+            sum(t.tokens.total_tokens for t in last_trajs) / max(1, len(last_trajs))
+        )
+        last_acc = last_rec.evaluation_after.pass_rate
+        total_acc_delta = last_acc - gen0_acc
+        total_cost_delta = last_cost - gen0_cost
+        lines.append("-------------------------------------------------")
+        lines.append(
+            f"Summary: Memory: 0 -> {last_rec.memory_store_size} entries (+{last_rec.memory_store_size}) | "
+            f"Accuracy: {gen0_acc:.4f} -> {last_acc:.4f} ({total_acc_delta:+.4f}) | "
+            f"Cost: {gen0_cost:.1f} tok -> {last_cost:.1f} tok ({total_cost_delta:+.1f} tok)"
+        )
+        return "\n".join(lines)
+
 
 class LoopStalled(RuntimeError):
     """Raised when the mutator has no move left to propose for the dominant cause."""
@@ -158,6 +228,9 @@ def run_loop(
     stop_on_stall: bool = True,
     on_generation: Callable[[GenerationRecord], None] | None = None,
     reliability_repeats: int = DEFAULT_RELIABILITY_REPEATS,
+    memory_store: EpisodicMemoryStore | None = None,
+    memory_store_path: str | Path | None = None,
+    reflector: Reflector | None = None,
 ) -> LineageReport:
     """Run the full agent-engineer loop for one domain and return its lineage.
 
@@ -182,7 +255,13 @@ def run_loop(
     synthesizer = synthesizer or TemplateSynthesizer()
     diagnoser = diagnoser or HeuristicDiagnoser()
     mutator = mutator or LadderMutator()
-    runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
+    reflector = reflector or HeuristicReflector()
+    if memory_store is None:
+        memory_store = EpisodicMemoryStore(storage_path=memory_store_path)
+
+    runner = TrajectoryRunner(
+        backend=backend, tool_runtime=tool_runtime, evaluator=evaluator, memory_store=memory_store
+    )
 
     root_spec = synthesizer.synthesize(
         spec_id=spec_id,
@@ -198,6 +277,7 @@ def run_loop(
             root_spec, task_suite, evaluator, runner, reliability_repeats
         )
         selection_policy = MinimumDeltaPolicy(min_delta=noise_floor)
+        memory_store.clear()
 
     def score(run: EvaluationRun) -> float:
         return run.pass_rate if metric == "pass_rate" else run.mean_score
@@ -213,6 +293,13 @@ def run_loop(
         )
         if diagnosis.dominant_cause is None:
             break  # nothing failed; there is nothing left to fix
+
+        # Self-reflection: if current_spec has episodic memory active, distill lessons
+        if current_spec.memory.kind is MemoryKind.EPISODIC_STORE and current_spec.memory.persist_across_runs:
+            reflections = reflector.distill(
+                current_spec, current_run, diagnosis, generation=generation - 1
+            )
+            memory_store.add_many(reflections)
 
         proposal = mutator.propose_with_child(
             current_spec,
@@ -230,8 +317,29 @@ def run_loop(
         mutation, child_spec = proposal
         already_tried.add((mutation.kind.value, mutation.target_path))
 
+        # If child_spec introduced episodic memory, distill lessons from prior run now
+        if (
+            child_spec.memory.kind is MemoryKind.EPISODIC_STORE
+            and child_spec.memory.persist_across_runs
+            and len(memory_store) == 0
+        ):
+            reflections = reflector.distill(
+                current_spec, current_run, diagnosis, generation=generation - 1
+            )
+            memory_store.add_many(reflections)
+
         child_run = runner.run_suite(child_spec, task_suite, generation=generation)
         verdict = selection_policy.decide(before=score(current_run), after=score(child_run))
+
+        # Accumulate reflections from child_run when child_spec has episodic memory
+        if child_spec.memory.kind is MemoryKind.EPISODIC_STORE and child_spec.memory.persist_across_runs:
+            child_diag = diagnoser.diagnose(
+                child_spec, child_run, diagnosis_id=f"{child_spec.spec_id}::diag{generation}"
+            )
+            child_reflections = reflector.distill(
+                child_spec, child_run, child_diag, generation=generation
+            )
+            memory_store.add_many(child_reflections)
 
         record = GenerationRecord(
             generation=generation,
@@ -242,6 +350,7 @@ def run_loop(
             verdict=verdict,
             spec_before=current_spec,
             spec_after=child_spec,
+            memory_store_size=len(memory_store),
         )
         generations.append(record)
         if on_generation is not None:
@@ -253,4 +362,9 @@ def run_loop(
         # reverted: current_spec/current_run stay put, but already_tried keeps the
         # ladder moving forward on the next generation instead of re-proposing this edit
 
-    return LineageReport(root_spec=root_spec, generations=tuple(generations), noise_floor=noise_floor)
+    return LineageReport(
+        root_spec=root_spec,
+        generations=tuple(generations),
+        noise_floor=noise_floor,
+        memory_store=memory_store,
+    )
