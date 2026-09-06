@@ -3,28 +3,46 @@
 Honest accounting of what this build has actually measured. Read this before
 citing any number this CLI prints, or any chart built from one.
 
-## Live-model status: a real run is in progress; not landed in this document yet
+## Live-model status: two attempts, neither landed a real number yet
 
-This section has changed once already and may change again -- read the date
-context, not just the words, if you're comparing against an older copy.
+This section has changed more than once already and may change again -- read
+it as a status log, not a one-time verdict.
 
-As of this writing, API keys have been supplied directly and a live run
-against GLM 4.7 Flash (with a smaller "nano" model as fallback) is in
-progress against the real `code_math` domain, run separately from this CLI.
-**No real numbers from that run have landed in this repository yet.** Nothing
-below should be read as if they had: every number this CLI itself has printed,
-in every run it has done so far, still comes from a scripted backend
-(`agent_engineer.cli.ScriptedBackend`), on all three domains, with no
-exception. `agent_engineer.cli.AnthropicBackend` exists in the source and is
-reachable via `--backend anthropic`, and is no longer a dead code path in
-principle -- a key is reachable in the environment now -- but it has not
-been exercised through this CLI, and no run through it is reported here.
+**This CLI's own attempt.** As reported through this session's orchestrator,
+API keys were supplied directly and a live run against GLM 4.7 Flash (with a
+smaller "nano" model as fallback) was said to be in progress against the real
+`code_math` domain, run separately from this CLI. **No real numbers from that
+run have landed in this repository as of this writing.** Every number this
+CLI itself has printed, in every run it has done so far, still comes from a
+scripted backend (`agent_engineer.cli.ScriptedBackend`), on all three
+domains, with no exception. `agent_engineer.cli.AnthropicBackend` exists in
+the source and is reachable via `--backend anthropic`, but it has not been
+exercised through this CLI, and no run through it is reported here.
 
-Once real numbers land, this section will say, **per domain**, which numbers
-came from a live model and which still come from a scripted backend --
-because different domains may end up measured differently, and a document
+**A second, independent attempt, in a different session working the same
+project.** That session was first asked to search for a reachable Anthropic
+key (none was reachable), then explicitly asked to use GPT-5 nano via
+`OPENAI_API_KEY` (also not reachable in that session's environment), then
+told to stand down on the real-model attempt entirely. It stopped rather than
+simulate a result either time. What it left behind, staged and tested but
+never executed against a real key: `experiments/gpt5_nano_backend.py` (a
+`ModelBackend` for GPT-5 nano over the OpenAI-compatible API) and
+`experiments/run_real_model_gate.py` (the driver that would wire it to
+`agent_engineer.loop.run_loop` against real `code_math` and measure a real
+noise floor before comparing any delta against it). `tests/test_gpt5_nano_backend.py`
+covers the missing-key path, response parsing, and retries -- with no network
+calls anywhere in that test file, confirmed by reading it. `README.md`
+documents the exact reproduction command (`OPENAI_API_KEY=sk-...
+python experiments/run_real_model_gate.py`), which someone with a working key
+can run to produce `artifacts/code_math_gpt5_nano_lineage.{json,md}`. As of
+this writing that command has not been run in either session.
+
+So: **as of this writing, no live-model number exists anywhere in this
+repository, on any domain, from either attempt.** Once one lands -- from
+either session -- this section will say, per domain, which numbers came from
+a live model and which still come from a scripted backend, because a document
 that says "live" once at the top and stops distinguishing after that is not
-honest about a partial result. If the live run fails, times out, or is cut
+honest about a partial result. If a live run fails, times out, or is cut
 short, this section says that plainly instead: a run that didn't finish is
 not evidence either way, and is not something to round up.
 
@@ -78,13 +96,33 @@ end to end on a scripted backend" -- not "the agent got better."
 
 A second scripted-backend suite, built separately to specifically exercise
 rejected mutations, negative deltas, and a delta smaller than run-to-run
-variance (which must not be accepted), is expected to land in this repo. The
-CLI's rendering was already built and tested against a mixed shape --
-accepted, reverted, positive, and zero delta together -- rather than against
-a single clean climb, precisely so that handoff needs no rework here beyond
-pointing the CLI at whichever backend produces it. This section is the one
-place in the repo that speaks to the no-live-model limitation; a second,
-competing writeup of the same fact should not exist alongside it.
+variance, has landed: `tests/test_code_math_loop_decision_stage.py`, three
+tests against the real `code_math` domain and the unmodified engine:
+
+- a mutation that measures worse than its parent is rejected, with an
+  assertion that `report.final_spec` is actually the parent spec, not just a
+  decision flag saying so;
+- a real reliability variance, measured through the frozen
+  `agent_engineer.evaluation.Evaluator` (`repeats=3`, not asserted by fiat) on
+  a probe backend with one attempt-flaky task -- population variance
+  `0.013889` (noise floor, its standard deviation, `0.117851`) -- used to show
+  the engine's *default* `MinimumDeltaPolicy(min_delta=1e-9)` ACCEPTS a true
+  delta smaller than that noise floor, and that configuring `min_delta` from
+  the measured variance correctly REVERTS the same delta instead: a real gap
+  in the default policy's noise-blindness, demonstrated rather than asserted;
+- a mixed lineage -- one reject, one accept, one reject -- saved as
+  `artifacts/scripted_decision_lineage.{json,md}`, labelled `SCRIPTED`
+  throughout: gen1 `0.6250 -> 0.1875` (`-0.4375`, reverted), gen2
+  `0.6250 -> 0.8125` (`+0.1875`, accepted), gen3 `0.8125 -> 0.8750` (`+0.0625`,
+  reverted -- inside the `0.117851` noise floor).
+
+This CLI's own rendering (`agent_engineer/cli.py`, `tests/test_cli.py`) was
+built and tested against the same mixed shape independently -- accepted,
+reverted, positive, negative, and zero delta together -- rather than against
+a single clean climb, so no rework was needed here once this landed; the two
+were developed in parallel and agree. This section is the one place in the
+repo that speaks to the no-live-model limitation; a second, competing
+writeup of the same fact should not exist alongside it.
 
 ## The "domain-agnostic" claim, and what it rests on
 
