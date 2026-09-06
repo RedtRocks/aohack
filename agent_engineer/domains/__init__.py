@@ -21,7 +21,7 @@ any name below.
 
 from __future__ import annotations
 
-from agent_engineer.domains import api_orchestration, code_math, extraction
+from agent_engineer.domains import api_orchestration, code_math, extraction, mcp_everything
 from agent_engineer.evaluation import DomainSuite, TaskEvaluator
 
 __all__ = ["DOMAIN_NAMES", "get_suite", "get_evaluator"]
@@ -30,6 +30,7 @@ _DOMAINS = {
     "code_math": code_math,
     "api_orchestration": api_orchestration,
     "extraction": extraction,
+    "mcp_everything": mcp_everything,
 }
 
 DOMAIN_NAMES: tuple[str, ...] = tuple(_DOMAINS)
