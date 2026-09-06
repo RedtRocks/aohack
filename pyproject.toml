@@ -5,6 +5,9 @@ description = "Frozen typed schemas for the automated-agent-engineer build."
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.7,<3"]
 
+[project.scripts]
+agent-engineer = "agent_engineer.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 

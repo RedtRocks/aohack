@@ -33,6 +33,7 @@ measurement entirely -- no surprise extra calls for a caller who opts out.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from agent_engineer.evaluation import Evaluator
 from agent_engineer.ports import DomainSuite, ModelBackend, TaskEvaluator, ToolRuntime
@@ -155,6 +156,7 @@ def run_loop(
     selection_policy: SelectionPolicy | None = None,
     metric: str = "pass_rate",
     stop_on_stall: bool = True,
+    on_generation: Callable[[GenerationRecord], None] | None = None,
     reliability_repeats: int = DEFAULT_RELIABILITY_REPEATS,
 ) -> LineageReport:
     """Run the full agent-engineer loop for one domain and return its lineage.
@@ -163,6 +165,13 @@ def run_loop(
     stage 5 compares (``"pass_rate"`` or ``"mean_score"``); either is derived
     purely from the verdicts the supplied evaluator already produced, never
     recomputed by the engine.
+
+    ``on_generation``, if given, is called once per generation with the
+    :class:`GenerationRecord` just produced, in order, before the loop moves on
+    to the next one. It exists so a caller (a CLI, a progress bar) can stream
+    the lineage as it is built instead of waiting for the whole
+    :class:`LineageReport`; the loop's own control flow and return value are
+    unaffected by whether one is supplied.
 
     When ``selection_policy`` is not supplied, this measures the root spec's
     reliability through the Evaluator harness (``repeats=reliability_repeats``,
@@ -224,18 +233,19 @@ def run_loop(
         child_run = runner.run_suite(child_spec, task_suite, generation=generation)
         verdict = selection_policy.decide(before=score(current_run), after=score(child_run))
 
-        generations.append(
-            GenerationRecord(
-                generation=generation,
-                mutation=mutation,
-                diagnosis=diagnosis,
-                evaluation_before=current_run,
-                evaluation_after=child_run,
-                verdict=verdict,
-                spec_before=current_spec,
-                spec_after=child_spec,
-            )
+        record = GenerationRecord(
+            generation=generation,
+            mutation=mutation,
+            diagnosis=diagnosis,
+            evaluation_before=current_run,
+            evaluation_after=child_run,
+            verdict=verdict,
+            spec_before=current_spec,
+            spec_after=child_spec,
         )
+        generations.append(record)
+        if on_generation is not None:
+            on_generation(record)
 
         if verdict.accepted:
             current_spec = child_spec
