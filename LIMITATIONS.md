@@ -96,8 +96,8 @@ end to end on a scripted backend" -- not "the agent got better."
 
 A second scripted-backend suite, built separately to specifically exercise
 rejected mutations, negative deltas, and a delta smaller than run-to-run
-variance, has landed: `tests/test_code_math_loop_decision_stage.py`, three
-tests against the real `code_math` domain and the unmodified engine:
+variance, has landed: `tests/test_code_math_loop_decision_stage.py`, tests
+against the real `code_math` domain and the unmodified engine:
 
 - a mutation that measures worse than its parent is rejected, with an
   assertion that `report.final_spec` is actually the parent spec, not just a
@@ -106,15 +106,33 @@ tests against the real `code_math` domain and the unmodified engine:
   `agent_engineer.evaluation.Evaluator` (`repeats=3`, not asserted by fiat) on
   a probe backend with one attempt-flaky task -- population variance
   `0.013889` (noise floor, its standard deviation, `0.117851`) -- used to show
-  the engine's *default* `MinimumDeltaPolicy(min_delta=1e-9)` ACCEPTS a true
-  delta smaller than that noise floor, and that configuring `min_delta` from
-  the measured variance correctly REVERTS the same delta instead: a real gap
-  in the default policy's noise-blindness, demonstrated rather than asserted;
+  that a true delta smaller than that noise floor gets reverted rather than
+  accepted (see below for how that stopped depending on the caller
+  remembering to configure it);
 - a mixed lineage -- one reject, one accept, one reject -- saved as
   `artifacts/scripted_decision_lineage.{json,md}`, labelled `SCRIPTED`
   throughout: gen1 `0.6250 -> 0.1875` (`-0.4375`, reverted), gen2
   `0.6250 -> 0.8125` (`+0.1875`, accepted), gen3 `0.8125 -> 0.8750` (`+0.0625`,
   reverted -- inside the `0.117851` noise floor).
+
+**A gap this found in the engine's own default got fixed, not just written
+down.** The first version of the test above showed `run_loop`'s default
+`MinimumDeltaPolicy(min_delta=1e-9)` would ACCEPT that `+0.0625` delta,
+because `1e-9` has no notion of measurement noise and any positive number
+clears it. Rather than leave that as a documented hole, `agent_engineer/loop.py`
+was changed so that when a caller does not supply their own
+`selection_policy`, `run_loop` now measures a real reliability variance for
+the root spec through the `Evaluator` harness (`repeats=3`) before running any
+generation, and uses the resulting standard deviation as the keep threshold
+for the whole lineage automatically -- see `run_loop`'s own docstring and
+`LineageReport.noise_floor`. `tests/test_code_math_loop_decision_stage.py::test_the_default_reverts_a_delta_smaller_than_the_measured_noise_floor`
+is the regression test; a companion test confirms the old, permissive
+behavior is still reachable for a caller who deliberately passes their own
+`selection_policy` and wants it. The CLI surfaces the measured threshold in
+its lineage summary (`report.noise_floor`) rather than leaving it invisible.
+This is a stronger claim than "we noted the gap": the loop found its own
+default threshold was too permissive to survive its own reliability
+measurement, and that got fixed.
 
 This CLI's own rendering (`agent_engineer/cli.py`, `tests/test_cli.py`) was
 built and tested against the same mixed shape independently -- accepted,

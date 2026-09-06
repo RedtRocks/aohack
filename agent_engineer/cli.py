@@ -209,6 +209,11 @@ def _render_lineage_summary(report: LineageReport) -> str:
     lines = ["", "=== lineage summary ===", *report.summary_lines()]
     accepted = len(report.accepted_mutations)
     lines.append(f"{accepted}/{len(report.generations)} generations accepted")
+    if report.noise_floor is not None:
+        lines.append(
+            f"keep threshold: {report.noise_floor:.6f} (measured run-to-run noise floor "
+            "on the root spec, repeats=3 -- not a fixed epsilon)"
+        )
     return "\n".join(lines)
 
 
