@@ -13,7 +13,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agent_engineer", "agent_engineer.evaluation"]
+packages = [
+    "agent_engineer",
+    "agent_engineer.evaluation",
+    "agent_engineer.domains",
+    "agent_engineer.domains.extraction",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
