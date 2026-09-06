@@ -149,10 +149,22 @@ class LineageReport:
             sum(t.tokens.total_tokens for t in gen0_trajs) / max(1, len(gen0_trajs))
         )
         gen0_acc = gen0_run.pass_rate
+        gen0_solved = sum(1 for t in gen0_trajs if t.verdict and t.verdict.passed)
+        gen0_cost_per_solved = (
+            f"{(sum(t.tokens.total_tokens for t in gen0_trajs) / gen0_solved):.1f} tok"
+            if gen0_solved > 0
+            else "N/A (0 solved)"
+        )
 
-        headers = ["Iteration", "Memory Size", "Accuracy", "Cost / Task", "Verdict"]
+        headers = ["generation", "memory entry count", "accuracy (with cost)", "COST PER SOLVED TASK", "verdict"]
         rows: list[list[str]] = [
-            ["gen 0 (root)", "0 entries", f"{gen0_acc:.4f}", f"{gen0_cost:.1f} tok", "baseline"]
+            [
+                "gen 0 (root)",
+                "0 entries",
+                f"{gen0_acc:.4f} ({gen0_cost:.1f} tok)",
+                gen0_cost_per_solved,
+                "baseline",
+            ]
         ]
 
         for record in self.generations:
@@ -162,6 +174,12 @@ class LineageReport:
                 sum(t.tokens.total_tokens for t in after_trajs) / max(1, len(after_trajs))
             )
             after_acc = after_run.pass_rate
+            after_solved = sum(1 for t in after_trajs if t.verdict and t.verdict.passed)
+            after_cost_per_solved = (
+                f"{(sum(t.tokens.total_tokens for t in after_trajs) / after_solved):.1f} tok"
+                if after_solved > 0
+                else "N/A (0 solved)"
+            )
             decision = "ACCEPTED" if record.accepted else "REVERTED"
             acc_delta = after_acc - record.verdict.before
             cost_delta = after_cost - gen0_cost
@@ -169,8 +187,8 @@ class LineageReport:
                 [
                     f"gen {record.generation}",
                     f"{record.memory_store_size} entries",
-                    f"{after_acc:.4f} ({acc_delta:+.4f})",
-                    f"{after_cost:.1f} tok ({cost_delta:+.1f} tok)",
+                    f"{after_acc:.4f} ({after_cost:.1f} tok)",
+                    after_cost_per_solved,
                     decision,
                 ]
             )
@@ -194,13 +212,20 @@ class LineageReport:
             sum(t.tokens.total_tokens for t in last_trajs) / max(1, len(last_trajs))
         )
         last_acc = last_rec.evaluation_after.pass_rate
+        last_solved = sum(1 for t in last_trajs if t.verdict and t.verdict.passed)
+        last_cost_per_solved = (
+            f"{(sum(t.tokens.total_tokens for t in last_trajs) / last_solved):.1f} tok"
+            if last_solved > 0
+            else "N/A (0 solved)"
+        )
         total_acc_delta = last_acc - gen0_acc
         total_cost_delta = last_cost - gen0_cost
         lines.append("-------------------------------------------------")
         lines.append(
             f"Summary: Memory: 0 -> {last_rec.memory_store_size} entries (+{last_rec.memory_store_size}) | "
             f"Accuracy: {gen0_acc:.4f} -> {last_acc:.4f} ({total_acc_delta:+.4f}) | "
-            f"Cost: {gen0_cost:.1f} tok -> {last_cost:.1f} tok ({total_cost_delta:+.1f} tok)"
+            f"Cost: {gen0_cost:.1f} tok -> {last_cost:.1f} tok ({total_cost_delta:+.1f} tok) | "
+            f"Cost / Solved Task: {gen0_cost_per_solved} -> {last_cost_per_solved}"
         )
         return "\n".join(lines)
 
