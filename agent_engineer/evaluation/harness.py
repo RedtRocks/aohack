@@ -375,6 +375,22 @@ class Evaluator:
                 detail=f"{type(error).__name__}: {error}",
             )
 
+        if trajectory.task_id != task.task_id:
+            # Grading this would credit one task's run to another. Fail it loudly
+            # in the detail rather than quietly mis-attributing a pass.
+            return RunOutcome(
+                task_id=task.task_id,
+                attempt=attempt,
+                passed=False,
+                errored=True,
+                elapsed_seconds=trajectory.elapsed_seconds,
+                trajectory_id=trajectory.trajectory_id,
+                detail=(
+                    f"runner returned a trajectory for task {trajectory.task_id!r} "
+                    f"when asked for {task.task_id!r}"
+                ),
+            )
+
         refused = is_refusal(trajectory)
         verdict = trajectory.verdict
         if verdict is None:
