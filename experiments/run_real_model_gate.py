@@ -57,6 +57,7 @@ from agent_engineer.evaluation.metrics import population_variance  # noqa: E402
 from agent_engineer.loop import run_loop  # noqa: E402
 from agent_engineer.ports import ToolResult, ToolSchema  # noqa: E402
 from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner  # noqa: E402
+from agent_engineer.stages.select import MinimumDeltaPolicy  # noqa: E402
 from agent_engineer.stages.synthesize import TemplateSynthesizer  # noqa: E402
 
 SPEC_ID = "code-math-gpt5-nano"
@@ -153,6 +154,11 @@ def main() -> None:
     baseline_report = harness.run_iteration(0, root_spec, _replay_runner(baseline_replicates))
 
     print(f"[3/5] running the real five-stage loop ({MAX_GENERATIONS} generations max)...", flush=True)
+    # run_loop's own default would otherwise measure this same noise floor itself
+    # (another real repeats=3 pass, another len(suite.tasks)*3 calls) -- pass the
+    # floor already measured above explicitly so that measurement is not paid for
+    # twice.
+    noise_floor_std = max(1e-9, noise_variance**0.5)
     lineage = run_loop(
         spec_id=SPEC_ID,
         goal=GOAL,
@@ -164,6 +170,7 @@ def main() -> None:
         max_generations=MAX_GENERATIONS,
         metric="mean_score",
         synthesizer=_FixedSpecSynthesizer(root_spec),
+        selection_policy=MinimumDeltaPolicy(min_delta=noise_floor_std),
     )
     for line in lineage.summary_lines():
         print(f"    {line}", flush=True)

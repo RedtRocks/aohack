@@ -13,13 +13,19 @@ evaluating anything. This module exercises the two cases that matter:
 * a mutation whose measured delta is smaller than the run-to-run noise in the
   metric (a real reliability variance, measured over ``repeats=3`` through the
   frozen :class:`~agent_engineer.evaluation.Evaluator` harness, not asserted by
-  fiat) must not be treated as an improvement. The engine's default
-  :class:`~agent_engineer.stages.select.MinimumDeltaPolicy` has a ``min_delta``
-  of ``1e-9`` -- effectively "any positive number" -- so this also demonstrates
-  that the default policy alone does *not* protect against noise; only a
-  caller who measures reliability and configures ``min_delta`` from it gets
-  that protection. That gap is real and is called out in the limitations
-  write-up, not papered over here.
+  fiat) must not be treated as an improvement.
+
+That second case used to be a real gap: :func:`agent_engineer.loop.run_loop`
+used to default to :class:`~agent_engineer.stages.select.MinimumDeltaPolicy`'s
+own default (``min_delta=1e-9``), which has no notion of noise and accepts any
+positive delta whatsoever. ``run_loop`` now measures a real noise floor for
+the root spec automatically, before running any generation, and uses it as the
+default keep threshold -- so a caller does not have to know to configure
+anything to get this protection; see the module docstring on
+``agent_engineer/loop.py``. A caller who wants the old, permissive behaviour
+has to opt into it explicitly by passing their own ``selection_policy`` --
+which also means the automatic measurement (and its extra calls) never runs
+for them, so opting out is free.
 
 Every backend below is scripted and says so. Nothing here calls a real model.
 """
@@ -28,12 +34,9 @@ from __future__ import annotations
 
 import re
 
-from agent_engineer.domains.code_math import DOMAIN, EVALUATOR_ID, get_evaluator, get_suite
-from agent_engineer.evaluation import Evaluator
+from agent_engineer.domains.code_math import EVALUATOR_ID, get_evaluator, get_suite
 from agent_engineer.loop import run_loop
 from agent_engineer.ports import AgentAction, ToolResult, ToolSchema
-from agent_engineer.schemas import AgentSpec
-from agent_engineer.stages.evaluate import TrajectoryRunner
 from agent_engineer.stages.select import MinimumDeltaPolicy
 
 _GEN_SUFFIX = re.compile(r"-g(\d+)$")
@@ -60,7 +63,9 @@ class _TieredBackend:
     """Solves exactly ``solved_by_tier[tier]`` tasks correctly, deterministically,
     where tier is read off the spec id (see :func:`_tier`). Scripted, not a model:
     it exists to put a chosen, known number of tasks right or wrong per
-    generation so the resulting lineage is exact and checkable by hand."""
+    generation so the resulting lineage is exact and checkable by hand. Fully
+    deterministic -- repeated attempts of the same spec always agree -- so it
+    measures zero reliability variance through the harness."""
 
     def __init__(self, task_order: tuple[str, ...], solved_by_tier: dict[int, int]) -> None:
         self._order = task_order
@@ -74,25 +79,46 @@ class _TieredBackend:
         return AgentAction(final_answer=answer, prompt_tokens=5, completion_tokens=5)
 
 
-class _SingleFlakyProbeBackend:
-    """Scripted, used only to measure a real reliability variance through the
-    frozen Evaluator harness (``repeats=3``). Exactly one task flips from
-    correct to wrong depending on which attempt is asked; every other task is
-    answered correctly on every attempt, so all of the measured variance comes
-    from that one task, and the number is checkable by hand: the population
-    variance of one flip among three attempts is 2/9 regardless of which
-    attempt flips."""
+class _TieredWithNoiseBackend:
+    """Like :class:`_TieredBackend`, plus exactly one task with genuine,
+    hand-scripted variance.
 
-    def __init__(self, flaky_task_id: str) -> None:
-        self._flaky_task_id = flaky_task_id
-        self._seen = 0
+    That one task's correctness follows ``noisy_pattern`` for its first calls
+    (enough entries to give the frozen Evaluator harness's ``repeats=3``
+    measurement real, non-zero variance to find) and is constant (correct)
+    after the pattern runs out. Since ``run_loop``'s own default noise-floor
+    measurement is the *first* thing that touches this backend -- three calls
+    to every task, before any generation runs -- the noisy task's pattern is
+    exactly consumed by that measurement, and every generation-time call
+    afterwards lands past the end of the pattern and is constant. The tiered
+    structural signal is therefore the only thing that varies from one
+    generation's comparison to the next; the noise floor it gets compared
+    against is real, not asserted.
+    """
+
+    def __init__(
+        self,
+        task_order: tuple[str, ...],
+        solved_by_tier: dict[int, int],
+        *,
+        noisy_task_id: str,
+        noisy_pattern: tuple[bool, ...] = (True, False, True),
+    ) -> None:
+        self._other_tasks = tuple(t for t in task_order if t != noisy_task_id)
+        self._solved_by_tier = solved_by_tier
+        self._noisy_task_id = noisy_task_id
+        self._noisy_pattern = noisy_pattern
+        self._noisy_calls = 0
 
     def next_action(self, spec, task, tools, history) -> AgentAction:
-        if task.task_id == self._flaky_task_id:
-            correct = self._seen == 0
-            self._seen += 1
+        if task.task_id == self._noisy_task_id:
+            index = self._noisy_calls
+            self._noisy_calls += 1
+            correct = self._noisy_pattern[index] if index < len(self._noisy_pattern) else True
         else:
-            correct = True
+            tier = _tier(spec.spec_id)
+            solved = self._solved_by_tier.get(tier, self._solved_by_tier[max(self._solved_by_tier)])
+            correct = task.task_id in set(self._other_tasks[:solved])
         answer = task.expected if correct else None
         return AgentAction(final_answer=answer, prompt_tokens=5, completion_tokens=5)
 
@@ -135,83 +161,72 @@ def test_a_mutation_that_makes_things_worse_is_rejected_and_the_parent_stays_in_
     assert report.final_spec.system_prompt == report.root_spec.system_prompt
 
 
-def test_a_delta_smaller_than_measured_reliability_variance_is_not_an_improvement():
+def test_the_default_reverts_a_delta_smaller_than_the_measured_noise_floor():
+    """The fix: run_loop's own default now measures a real reliability variance
+    for the root spec and reverts a sub-noise delta WITHOUT the caller having
+    to configure anything."""
     suite = get_suite()
     task_order = tuple(task.task_id for task in suite.tasks)
-    evaluator = get_evaluator()
-
-    # Step 1: measure a REAL reliability variance through the frozen harness,
-    # repeats=3, on a backend whose only source of variance is one task that
-    # flips pass/fail depending on the attempt. This is not asserted by fiat --
-    # it comes out of agent_engineer.evaluation.Evaluator itself.
-    probe_spec = AgentSpec(spec_id="reliability-probe", system_prompt="Answer the task.")
-    probe_backend = _SingleFlakyProbeBackend(task_order[0])
-    probe_runner = TrajectoryRunner(backend=probe_backend, tool_runtime=_NoTools(), evaluator=evaluator)
-    harness = Evaluator([suite], evaluators={DOMAIN: evaluator}, repeats=3)
-    probe_report = harness.run_iteration(0, probe_spec, probe_runner.as_task_runner())
-    reliability = probe_report.domain(DOMAIN).reliability
-    assert reliability.is_defined
-    # one flip among three attempts always has population variance 2/9, spread
-    # over 16 tasks (only one of which varies at all)
-    expected_variance = (2 / 9) / len(suite.tasks)
-    assert abs(reliability.value - expected_variance) < 1e-9
-    noise_std = reliability.value**0.5
-
-    # Step 2: a deterministic, non-flaky mutation that is genuinely better --
-    # one more task solved out of 16 -- but by less than the noise floor above.
-    backend_kwargs = dict(
-        backend=_TieredBackend(task_order, {0: 10, 1: 11}),
-        suite=suite,
-        max_generations=1,
+    # 9/15 non-noisy tasks solved at tier 0, 10/15 at tier 1 -- plus the noisy
+    # task, constant-correct from generation 0 onward (see class docstring) --
+    # gives a true delta of exactly 1/16, checkable by hand.
+    backend = _TieredWithNoiseBackend(
+        task_order, {0: 9, 1: 10}, noisy_task_id=task_order[0]
     )
+
+    report = _run(backend, suite, max_generations=1, spec_id="noise-floor-agent")
+
+    # the noise floor was measured, not asserted: one flip among three attempts
+    # always has population variance 2/9, spread over 16 tasks
+    assert report.noise_floor is not None
+    expected_noise_floor = ((2 / 9) / len(suite.tasks)) ** 0.5
+    assert abs(report.noise_floor - expected_noise_floor) < 1e-9
+
+    record = report.generations[0]
     true_delta = 1 / len(suite.tasks)
-    assert true_delta < noise_std, "the scenario requires the true delta to sit inside the noise"
+    assert abs(record.verdict.delta - true_delta) < 1e-9
+    assert true_delta < report.noise_floor, "the scenario requires the true delta to sit inside the noise"
 
-    # The engine's default policy (min_delta=1e-9) has no notion of noise: it
-    # accepts any positive delta, including one smaller than the measured
-    # variance. This is the real, current behaviour -- not a hypothetical.
-    naive_report = _run(**backend_kwargs, selection_policy=None, spec_id="naive-agent")
-    assert naive_report.generations[0].accepted
-    assert abs(naive_report.generations[0].verdict.delta - true_delta) < 1e-9
+    # the load-bearing assertion: reverted BY DEFAULT, no selection_policy passed
+    assert not record.accepted
+    assert report.final_spec.spec_id == report.root_spec.spec_id
 
-    # Only when the caller measures reliability and configures min_delta from
-    # it does the same true, positive delta get correctly withheld as noise.
-    noise_aware_report = _run(
-        **backend_kwargs,
-        selection_policy=MinimumDeltaPolicy(min_delta=noise_std),
-        spec_id="noise-aware-agent",
+
+def test_explicit_opt_out_keeps_the_old_permissive_behaviour_and_skips_measurement():
+    """A caller who wants the old, fixed-epsilon behaviour still gets it --
+    deliberately, by passing their own selection_policy -- and that choice
+    also means no noise-floor measurement (and no extra calls) ever runs."""
+    suite = get_suite()
+    task_order = tuple(task.task_id for task in suite.tasks)
+    backend = _TieredBackend(task_order, {0: 10, 1: 11})  # true delta 1/16, no noise involved
+
+    report = _run(
+        backend,
+        suite,
+        max_generations=1,
+        selection_policy=MinimumDeltaPolicy(min_delta=1e-9),
+        spec_id="opt-out-agent",
     )
-    assert not noise_aware_report.generations[0].accepted
-    assert noise_aware_report.final_spec.spec_id == noise_aware_report.root_spec.spec_id
+
+    assert report.noise_floor is None  # the measurement never ran
+    assert report.generations[0].accepted
+    assert abs(report.generations[0].verdict.delta - 1 / len(suite.tasks)) < 1e-9
 
 
 def test_a_mixed_lineage_has_at_least_one_accept_and_one_revert():
     """A sanity check on the mixed run captured as the demo artifact
     (see experiments/generate_scripted_decision_lineage.py): not a staged
-    all-accept run, and not a staged all-reject run either."""
+    all-accept run, and not a staged all-reject run either, and reverts the
+    sub-noise generation BY DEFAULT."""
     suite = get_suite()
     task_order = tuple(task.task_id for task in suite.tasks)
-    probe_backend = _SingleFlakyProbeBackend(task_order[0])
-    evaluator = get_evaluator()
-    probe_runner = TrajectoryRunner(backend=probe_backend, tool_runtime=_NoTools(), evaluator=evaluator)
-    harness = Evaluator([suite], evaluators={DOMAIN: evaluator}, repeats=3)
-    noise_std = (
-        harness.run_iteration(
-            0, AgentSpec(spec_id="probe", system_prompt="Answer the task."), probe_runner.as_task_runner()
-        )
-        .domain(DOMAIN)
-        .reliability.value
-        ** 0.5
+    # translates the original 16-task tiers {0:10,1:3,2:13,3:14} into the
+    # 15-task (non-noisy) space; the noisy task adds a constant +1 from
+    # generation 0 onward, so the totals land back on the same numbers
+    backend = _TieredWithNoiseBackend(
+        task_order, {0: 9, 1: 2, 2: 12, 3: 13}, noisy_task_id=task_order[0]
     )
-
-    backend = _TieredBackend(task_order, {0: 10, 1: 3, 2: 13, 3: 14})
-    report = _run(
-        backend,
-        suite,
-        max_generations=3,
-        selection_policy=MinimumDeltaPolicy(min_delta=noise_std),
-        spec_id="mixed-lineage-agent",
-    )
+    report = _run(backend, suite, max_generations=3, spec_id="mixed-lineage-agent")
 
     decisions = [record.verdict.decision.value for record in report.generations]
     assert "accepted" in decisions
@@ -220,3 +235,6 @@ def test_a_mixed_lineage_has_at_least_one_accept_and_one_revert():
     for record in report.generations:
         assert isinstance(record.verdict.before, float)
         assert record.verdict.delta == record.verdict.after - record.verdict.before
+    # gen 3 is the sub-noise case, reverted by default with no configuration
+    assert report.generations[-1].verdict.decision.value == "reverted"
+    assert abs(report.generations[-1].verdict.delta) < report.noise_floor

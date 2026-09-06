@@ -12,12 +12,29 @@ and every :class:`~agent_engineer.stages.select.Verdict` produced along the
 way, whether accepted or reverted. That is the artifact the integration gate
 checks: a lineage of mutations, each carrying its measured delta and its
 before number.
+
+**The keep-or-revert threshold defaults to noise-aware, not a fixed epsilon.**
+:class:`~agent_engineer.stages.select.MinimumDeltaPolicy`'s own default
+(``min_delta=1e-9``) accepts any positive delta whatsoever, including one
+smaller than the measurement noise in the metric itself -- and more retries
+always buys accuracy, so a threshold that cannot tell a real improvement from
+noise will happily accept neither. When the caller does not supply a
+``selection_policy``, this module measures a real reliability variance for the
+root spec through the frozen :class:`~agent_engineer.evaluation.Evaluator`
+harness (``repeats=3``) before running any generation, and uses the resulting
+standard deviation as the keep threshold for the whole lineage -- floored at
+the same tiny epsilon so a fully deterministic configuration (zero measured
+noise) still reverts a flat delta exactly as before. A caller who wants the
+old, permissive behaviour has to ask for it explicitly, by passing their own
+``selection_policy=MinimumDeltaPolicy(min_delta=...)``, which also skips this
+measurement entirely -- no surprise extra calls for a caller who opts out.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_engineer.evaluation import Evaluator
 from agent_engineer.ports import DomainSuite, ModelBackend, TaskEvaluator, ToolRuntime
 from agent_engineer.schemas import AgentSpec, Diagnosis, Mutation
 from agent_engineer.stages.diagnose import Diagnoser, HeuristicDiagnoser
@@ -25,6 +42,35 @@ from agent_engineer.stages.evaluate import EvaluationRun, TrajectoryRunner
 from agent_engineer.stages.mutate import LadderMutator, Mutator
 from agent_engineer.stages.select import MinimumDeltaPolicy, SelectionPolicy, Verdict
 from agent_engineer.stages.synthesize import SpecSynthesizer, TemplateSynthesizer
+
+DEFAULT_RELIABILITY_REPEATS = 3
+"""Repeats used to measure the default noise floor. The Evaluator harness
+requires at least this many for a defined reliability metric."""
+
+MIN_KEEP_DELTA_FLOOR = 1e-9
+"""The floor under the derived threshold: a fully deterministic configuration
+measures zero noise, and a flat delta must still revert, exactly as under the
+old fixed-epsilon default."""
+
+
+def _measure_noise_floor(
+    spec: AgentSpec,
+    task_suite: DomainSuite,
+    evaluator: TaskEvaluator,
+    runner: TrajectoryRunner,
+    repeats: int,
+) -> float:
+    """A real run-to-run noise floor for ``spec`` on ``task_suite``, measured
+    through the frozen Evaluator harness -- never asserted by fiat. Returns the
+    population-variance-of-pass-indicator, converted to a standard deviation,
+    floored at :data:`MIN_KEEP_DELTA_FLOOR`.
+    """
+    harness = Evaluator([task_suite], evaluators={task_suite.domain: evaluator}, repeats=repeats)
+    report = harness.run_iteration(0, spec, runner.as_task_runner())
+    reliability = report.domain(task_suite.domain).reliability
+    if not reliability.is_defined:
+        return MIN_KEEP_DELTA_FLOOR
+    return max(MIN_KEEP_DELTA_FLOOR, reliability.value**0.5)
 
 
 @dataclass(frozen=True)
@@ -51,6 +97,11 @@ class LineageReport:
 
     root_spec: AgentSpec
     generations: tuple[GenerationRecord, ...]
+    noise_floor: float | None = None
+    """The keep threshold actually used, when derived automatically from a measured
+    reliability variance (see the module docstring). ``None`` when the caller
+    supplied their own ``selection_policy`` -- the derivation never ran, so there
+    is no measured floor to report."""
 
     @property
     def final_spec(self) -> AgentSpec:
@@ -104,6 +155,7 @@ def run_loop(
     selection_policy: SelectionPolicy | None = None,
     metric: str = "pass_rate",
     stop_on_stall: bool = True,
+    reliability_repeats: int = DEFAULT_RELIABILITY_REPEATS,
 ) -> LineageReport:
     """Run the full agent-engineer loop for one domain and return its lineage.
 
@@ -111,11 +163,16 @@ def run_loop(
     stage 5 compares (``"pass_rate"`` or ``"mean_score"``); either is derived
     purely from the verdicts the supplied evaluator already produced, never
     recomputed by the engine.
+
+    When ``selection_policy`` is not supplied, this measures the root spec's
+    reliability through the Evaluator harness (``repeats=reliability_repeats``,
+    at least 3) before running any generation, and keeps only deltas that clear
+    that measured noise floor -- see the module docstring. Passing an explicit
+    ``selection_policy`` skips this measurement entirely.
     """
     synthesizer = synthesizer or TemplateSynthesizer()
     diagnoser = diagnoser or HeuristicDiagnoser()
     mutator = mutator or LadderMutator()
-    selection_policy = selection_policy or MinimumDeltaPolicy()
     runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
 
     root_spec = synthesizer.synthesize(
@@ -125,6 +182,13 @@ def run_loop(
         evaluator_id=evaluator_id,
         criteria=evaluator_criteria,
     )
+
+    noise_floor: float | None = None
+    if selection_policy is None:
+        noise_floor = _measure_noise_floor(
+            root_spec, task_suite, evaluator, runner, reliability_repeats
+        )
+        selection_policy = MinimumDeltaPolicy(min_delta=noise_floor)
 
     def score(run: EvaluationRun) -> float:
         return run.pass_rate if metric == "pass_rate" else run.mean_score
@@ -179,4 +243,4 @@ def run_loop(
         # reverted: current_spec/current_run stay put, but already_tried keeps the
         # ladder moving forward on the next generation instead of re-proposing this edit
 
-    return LineageReport(root_spec=root_spec, generations=tuple(generations))
+    return LineageReport(root_spec=root_spec, generations=tuple(generations), noise_floor=noise_floor)
