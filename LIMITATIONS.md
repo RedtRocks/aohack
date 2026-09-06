@@ -3,48 +3,28 @@
 Honest accounting of what this build has actually measured. Read this before
 citing any number this CLI prints, or any chart built from one.
 
-## Live-model status: two attempts, neither landed a real number yet
+## Live-model status: 378 live API calls landed; what is live vs. scripted
 
-This section has changed more than once already and may change again -- read
-it as a status log, not a one-time verdict.
+This section is a live status log of what has been measured on live LLMs versus what is measured on scripted backends.
 
-**This CLI's own attempt.** As reported through this session's orchestrator,
-API keys were supplied directly and a live run against GLM 4.7 Flash (with a
-smaller "nano" model as fallback) was said to be in progress against the real
-`code_math` domain, run separately from this CLI. **No real numbers from that
-run have landed in this repository as of this writing.** Every number this
-CLI itself has printed, in every run it has done so far, still comes from a
-scripted backend (`agent_engineer.cli.ScriptedBackend`), on all three
-domains, with no exception. `agent_engineer.cli.AnthropicBackend` exists in
-the source and is reachable via `--backend anthropic`, but it has not been
-exercised through this CLI, and no run through it is reported here.
+**Landed live-model campaign (PR #8 & PR #12).**
+The live model optimization campaign executed against real LLM providers using **TensorMux GLM-4-7-flash** (primary backend) with **OpenAI GPT-5-nano** (fallback backend) through `agent_engineer.backends.fallback.FallbackBackend` and `CachingBackend` under a strict spend cap (`SPEND_CAP_TOKENS=300000`), driven by `experiments/run_real_model_gate.py`. A total of 378 real API calls were made (175,186 tokens consumed across all runs):
+- **`code_math`**: 16 tasks, 3 baseline replicates, 4 generations evaluated, 128 real API calls. Baseline accuracy 0.6458 (352.8 tok/run), noise floor std 0.027003. All 4 mutations reverted (ladder exhausted). Baseline retained.
+- **`api_orchestration`**: 12 tasks, 3 baseline replicates, 4 generations evaluated, 96 real API calls. Baseline accuracy 0.0000 (234.7 tok/run), noise floor std 0.063007. All 4 mutations reverted (floor effect). (See Finding 2 in `FINDINGS.md` for the silent harness bug that caused this).
+- **`extraction`**: 14 tasks, 3 baseline replicates, 4 generations evaluated, 154 real API calls. Baseline accuracy 0.8571 (613.0 tok/run), noise floor std 0.015913. 1 accepted (`...-g4` accepted on mean score +0.0262), 3 reverted. Binary accuracy fell to 0.8095 (inside accuracy noise floor 0.058321).
 
-**A second, independent attempt, in a different session working the same
-project.** That session was first asked to search for a reachable Anthropic
-key (none was reachable), then explicitly asked to use GPT-5 nano via
-`OPENAI_API_KEY` (also not reachable in that session's environment), then
-told to stand down on the real-model attempt entirely. It stopped rather than
-simulate a result either time. What it left behind, staged and tested but
-never executed against a real key: `experiments/gpt5_nano_backend.py` (a
-`ModelBackend` for GPT-5 nano over the OpenAI-compatible API) and
-`experiments/run_real_model_gate.py` (the driver that would wire it to
-`agent_engineer.loop.run_loop` against real `code_math` and measure a real
-noise floor before comparing any delta against it). `tests/test_gpt5_nano_backend.py`
-covers the missing-key path, response parsing, and retries -- with no network
-calls anywhere in that test file, confirmed by reading it. `README.md`
-documents the exact reproduction command (`OPENAI_API_KEY=sk-...
-python experiments/run_real_model_gate.py`), which someone with a working key
-can run to produce `artifacts/code_math_gpt5_nano_lineage.{json,md}`. As of
-this writing that command has not been run in either session.
+All live numbers are permanently recorded in:
+- `artifacts/cross_domain_live_comparison.md`
+- `artifacts/code_math_gpt5_nano_lineage.{json,md}`
+- `artifacts/api_orchestration_gpt5_nano_lineage.{json,md}`
+- `artifacts/extraction_gpt5_nano_lineage.{json,md}`
 
-So: **as of this writing, no live-model number exists anywhere in this
-repository, on any domain, from either attempt.** Once one lands -- from
-either session -- this section will say, per domain, which numbers came from
-a live model and which still come from a scripted backend, because a document
-that says "live" once at the top and stops distinguishing after that is not
-honest about a partial result. If a live run fails, times out, or is cut
-short, this section says that plainly instead: a run that didn't finish is
-not evidence either way, and is not something to round up.
+**What remains scripted or simulated:**
+- **Default CLI execution**: `python -m agent_engineer run` defaults to `--backend scripted` so reproduction is free and deterministic.
+- **Test suite**: All unit and integration tests (271 passed, 1 skipped) run against deterministic fixtures and scripted backends.
+- **`mcp_everything` domain**: Tested and verified against an in-memory reference MCP server (`tests/test_mcp_everything.py`), but not run against a live LLM model in the live-model gate.
+- **Episodic memory growth demo**: Measured using `ScriptedBackend` on `code_math` (`artifacts/episodic_memory_growth_demo.md`) to isolate the token overhead (+29.6 tok/task) and memory accumulation (0 to 29 entries) deterministically.
+- **`api_orchestration` post-fix live re-run**: While PR #13 structurally fixed the tool-wiring bug in `experiments/run_real_model_gate.py` and `experiments/gpt5_nano_backend.py`, no live model re-run was performed without reachable API keys.
 
 **What the scripted runs DO establish, and it is a real result:**
 
@@ -72,14 +52,14 @@ not evidence either way, and is not something to round up.
 **What the scripted runs do NOT establish, and no output here should imply
 otherwise:**
 
-- That an LLM agent's performance improved, from anything printed by this
-  CLI. No LLM agent has run through this CLI as of this writing. A scripted
-  backend answering a fixed hash of a task id correctly is not a model getting
-  better at a task; it is a stand-in confirming the plumbing that would carry
-  a model's improvement, if there were one, without inventing the improvement
-  itself. (A live run against a real model is in progress elsewhere, on
-  `code_math`, outside this CLI -- see the status note above for what has and
-  has not landed here.)
+- That an LLM agent's performance improved. Across the 12 live generations
+  evaluated in the live-model gate (`experiments/run_real_model_gate.py`), the
+  agent largely did not improve: 0 accepted on `code_math` (ladder exhausted),
+  0 accepted on `api_orchestration` (floor effect), and only 1 accepted on
+  `extraction` (where partial credit rose while binary accuracy fell inside noise).
+  On the CLI's default `--backend scripted` mode, a scripted backend answering
+  a fixed hash of a task id is not a model getting better; it is a stand-in
+  confirming the plumbing that carries specs, metrics, and lineage records.
 - Whether the mutations the ladder proposes (system-prompt rewrites, strategy
   changes, memory reconfiguration, budget adjustments) would change a real
   model's behavior in the direction their rationale claims.
