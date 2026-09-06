@@ -408,13 +408,17 @@ class CachingBackend:
         cached = self._cache.get(cache_key)
         if cached is not None:
             return AgentAction(
-                final_answer=cached["final_answer"],
+                tool_name=cached.get("tool_name"),
+                args=cached.get("args", {}),
+                final_answer=cached.get("final_answer"),
                 prompt_tokens=cached["prompt_tokens"],
                 completion_tokens=cached["completion_tokens"],
             )
 
         action = self._backend.next_action(spec, task, tools, history)
         self._cache[cache_key] = {
+            "tool_name": action.tool_name,
+            "args": action.args,
             "final_answer": action.final_answer,
             "prompt_tokens": action.prompt_tokens,
             "completion_tokens": action.completion_tokens,
