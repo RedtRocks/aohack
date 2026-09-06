@@ -12,11 +12,20 @@ These prove the two claims the task hinges on:
 from __future__ import annotations
 
 import io
+import json
+from pathlib import Path
 from contextlib import redirect_stdout
 
 import pytest
 
-from agent_engineer.cli import ScriptedBackend, _render_generation, main, run_domain
+from agent_engineer.cli import (
+    ScriptedBackend,
+    _render_generation,
+    export_lineage_to_dict,
+    main,
+    render_saved_lineage,
+    run_domain,
+)
 from agent_engineer.domains import DOMAIN_NAMES
 from agent_engineer.evaluation.report import Improvement
 from agent_engineer.evaluation.metrics import Metric, undefined
@@ -180,3 +189,115 @@ def test_list_command_prints_every_registered_domain(capsys: pytest.CaptureFixtu
 def test_run_command_rejects_an_unregistered_domain() -> None:
     with pytest.raises(SystemExit):
         main(["run", "not-a-real-domain"])
+
+
+def test_render_saved_lineage_renders_scripted_decision_artifact() -> None:
+    """Artifact mode: renders artifacts/scripted_decision_lineage.json without re-running anything.
+
+    Proves:
+    - negative delta (-0.4375) renders legibly as REVERTED
+    - accepted delta (+0.1875) renders legibly as ACCEPTED
+    - sub-noise delta (+0.0625 within 0.1179 noise floor) renders legibly as REVERTED
+    - dominant failure causes and keep threshold are shown
+    """
+    path = Path("artifacts/scripted_decision_lineage.json")
+    rendered = render_saved_lineage(path)
+
+    # Generation 1: negative delta, reverted
+    assert "generation 1: REVERTED" in rendered
+    assert "-0.4375" in rendered
+    assert "0.6250 -> 0.1875" in rendered
+    assert "premature_stop" in rendered
+
+    # Generation 2: positive delta clearing threshold, accepted
+    assert "generation 2: ACCEPTED" in rendered
+    assert "+0.1875" in rendered
+    assert "0.6250 -> 0.8125" in rendered
+
+    # Generation 3: sub-noise delta, reverted
+    assert "generation 3: REVERTED" in rendered
+    assert "+0.0625" in rendered
+    assert "0.8125 -> 0.8750" in rendered
+
+    # Summary and noise floor
+    assert "=== lineage summary ===" in rendered
+    assert "1/3 generations accepted" in rendered
+    assert "0.117851" in rendered
+
+
+def test_render_saved_lineage_handles_undefined_metrics_without_rendering_zero() -> None:
+    """Guard test: undefined metric values (None) must render as 'undefined', never as 0."""
+    artifact = {
+        "domain": "code_math",
+        "task_count": 16,
+        "root_spec_id": "test-agent",
+        "final_spec_id": "test-agent",
+        "lineage": [
+            {
+                "generation": 1,
+                "motivating_cause": "premature_stop",
+                "mutation_kind": "system_prompt_rewrite",
+                "target_path": "system_prompt",
+                "before": None,
+                "after": 0.5,
+                "delta": None,
+                "decision": "reverted",
+                "reason": "before number was undefined",
+            }
+        ],
+    }
+    rendered = render_saved_lineage(artifact)
+    assert "undefined" in rendered
+    assert "undefined -> 0.5000" in rendered
+    # Ensure it did NOT format undefined as 0.0000
+    assert "0.0000 -> 0.5000" not in rendered
+
+
+def test_main_supports_direct_domain_invocation(capsys: pytest.CaptureFixture[str]) -> None:
+    """Acceptance test wiring: `python -m agent_engineer <domain>` works directly."""
+    exit_code = main(["code_math", "--max-generations", "1", "--quiet"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "results (agent_engineer.evaluation.report)" in out
+
+
+def test_main_supports_render_subcommand_and_direct_json_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`agent-engineer render <json>` and `agent-engineer <json>` both render saved artifacts."""
+    path_str = "artifacts/scripted_decision_lineage.json"
+
+    # Via `render` subcommand
+    exit_code_1 = main(["render", path_str])
+    assert exit_code_1 == 0
+    out_1 = capsys.readouterr().out
+    assert "generation 1: REVERTED" in out_1
+    assert "-0.4375" in out_1
+
+    # Via direct json path argument
+    exit_code_2 = main([path_str])
+    assert exit_code_2 == 0
+    out_2 = capsys.readouterr().out
+    assert "generation 1: REVERTED" in out_2
+    assert "-0.4375" in out_2
+
+
+def test_run_domain_with_output_writes_valid_lineage_artifact(tmp_path: Path) -> None:
+    """Confirm --output exports a valid JSON lineage that render_saved_lineage can parse."""
+    out_file = tmp_path / "lineage_export.json"
+    report = run_domain(
+        "code_math",
+        max_generations=1,
+        repeats=3,
+        stream=False,
+        output_path=out_file,
+    )
+    assert out_file.exists()
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["domain"] == "code_math"
+    assert len(data["lineage"]) == len(report.generations)
+
+    rendered = render_saved_lineage(out_file)
+    assert "domain: code_math" in rendered
+    assert "spec diff:" in rendered
+

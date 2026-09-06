@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+from pathlib import Path
 import re
 import sys
 from typing import Any
@@ -29,10 +31,18 @@ from agent_engineer.evaluation import Evaluator
 from agent_engineer.evaluation.report import render_report
 from agent_engineer.loop import GenerationRecord, LineageReport, LoopStalled, run_loop
 from agent_engineer.ports import ToolResult, ToolSchema
-from agent_engineer.schemas import diff_agent_specs
+from agent_engineer.schemas import AgentSpec, diff_agent_specs
 from agent_engineer.stages.evaluate import TrajectoryRunner
 
-__all__ = ["main", "NullToolRuntime", "ScriptedBackend", "AnthropicBackend"]
+__all__ = [
+    "main",
+    "NullToolRuntime",
+    "ScriptedBackend",
+    "AnthropicBackend",
+    "run_domain",
+    "render_saved_lineage",
+    "export_lineage_to_dict",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -171,24 +181,41 @@ def _print(*args: object) -> None:
     print(*args, flush=True)
 
 
+def _format_scalar(val: float | None) -> str:
+    """Format a metric value, rendering None strictly as 'undefined', never as 0."""
+    if val is None:
+        return "undefined"
+    return f"{val:.4f}"
+
+
+def _format_delta(delta: float | None) -> str:
+    """Format a delta value, signed, rendering None strictly as 'undefined'."""
+    if delta is None:
+        return "undefined"
+    return f"{delta:+.4f}"
+
+
 def _render_generation(record: GenerationRecord) -> str:
     """One generation: before/after/delta/outcome, the cause it targeted, and the spec diff.
 
     Deltas are signed and printed as measured -- positive, negative, or zero --
     and a reverted generation is labeled as reverted, never dressed up as a
     partial win. Nothing here assumes the delta is positive or that every
-    generation looks like the last one.
+    generation looks like the last one. Undefined metrics render as 'undefined',
+    never as 0.
     """
     outcome = "ACCEPTED" if record.accepted else "REVERTED"
-    cause = record.diagnosis.dominant_cause
-    cause_label = cause.value if cause is not None else "(no failures diagnosed)"
+    cause = record.diagnosis.dominant_cause or record.mutation.motivating_cause
+    cause_label = cause.value if hasattr(cause, "value") else str(cause) if cause is not None else "(no failures diagnosed)"
+    before_str = _format_scalar(record.verdict.before)
+    after_str = _format_scalar(record.verdict.after)
+    delta_str = _format_delta(record.verdict.delta)
     lines = [
         f"--- generation {record.generation}: {outcome} ---",
         f"  dominant cause targeted : {cause_label}",
         f"  mutation                : {record.mutation.kind.value} ({record.mutation.target_path})",
         f"  rationale               : {record.mutation.rationale}",
-        f"  before -> after         : {record.verdict.before:.4f} -> {record.verdict.after:.4f}"
-        f"  (delta {record.verdict.delta:+.4f})",
+        f"  before -> after         : {before_str} -> {after_str}  (delta {delta_str})",
         f"  verdict                 : {record.verdict.reason}",
     ]
     diff = diff_agent_specs(record.spec_before, record.spec_after)
@@ -217,9 +244,179 @@ def _render_lineage_summary(report: LineageReport) -> str:
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------- #
-# The run command
-# --------------------------------------------------------------------------- #
+def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
+    """Render a saved lineage artifact (e.g. artifacts/scripted_decision_lineage.json) without running anything.
+
+    Honors all guards:
+    - Never renders an undefined metric as 0; undefined renders as 'undefined'.
+    - Negative deltas, sub-noise reverts, and accepted mutations render legibly.
+    - Dominant cause, mutation kind, target path, verdict reason, and spec diff are shown.
+    """
+    if isinstance(data_or_path, (str, Path)):
+        path = Path(data_or_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"lineage artifact not found: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = data_or_path
+
+    lines: list[str] = []
+
+    domain = data.get("domain")
+    task_count = data.get("task_count")
+    backend = data.get("backend")
+    label = data.get("label")
+
+    header_parts: list[str] = []
+    if domain:
+        task_str = f" ({task_count} tasks)" if task_count is not None else ""
+        header_parts.append(f"domain: {domain}{task_str}")
+    if backend:
+        header_parts.append(f"backend: {backend}")
+    if header_parts:
+        lines.append("  ".join(header_parts))
+
+    if label:
+        lines.append(f"label: {label}")
+    if data.get("selection_policy"):
+        lines.append(f"selection policy: {data['selection_policy']}")
+    if data.get("root_spec_id") and data.get("final_spec_id"):
+        lines.append(f"root spec: {data['root_spec_id']} -> final spec: {data['final_spec_id']}")
+
+    lineage = data.get("lineage", [])
+    for gen in lineage:
+        generation = gen.get("generation", 0)
+        decision = str(gen.get("decision", "unknown")).upper()
+        cause = gen.get("motivating_cause") or gen.get("dominant_cause") or "(no failures diagnosed)"
+        mutation_kind = gen.get("mutation_kind", "unknown")
+        target_path = gen.get("target_path", "")
+        mutation_label = f"{mutation_kind} ({target_path})" if target_path else mutation_kind
+        rationale = gen.get("rationale")
+        before = gen.get("before")
+        after = gen.get("after")
+        delta = gen.get("delta")
+        if delta is None and before is not None and after is not None:
+            delta = after - before
+        reason = gen.get("reason", "")
+
+        before_str = _format_scalar(before)
+        after_str = _format_scalar(after)
+        delta_str = _format_delta(delta)
+
+        lines.append("")
+        lines.append(f"--- generation {generation}: {decision} ---")
+        lines.append(f"  dominant cause targeted : {cause}")
+        lines.append(f"  mutation                : {mutation_label}")
+        if rationale:
+            lines.append(f"  rationale               : {rationale}")
+        lines.append(f"  before -> after         : {before_str} -> {after_str}  (delta {delta_str})")
+        if reason:
+            lines.append(f"  verdict                 : {reason}")
+
+        # Spec diff if specs are included in the artifact
+        spec_before = gen.get("spec_before")
+        spec_after = gen.get("spec_after")
+        spec_diff = gen.get("spec_diff")
+        if spec_before is not None and spec_after is not None:
+            try:
+                sb = AgentSpec.model_validate(spec_before) if isinstance(spec_before, dict) else spec_before
+                sa = AgentSpec.model_validate(spec_after) if isinstance(spec_after, dict) else spec_after
+                diff = diff_agent_specs(sb, sa)
+                if diff:
+                    lines.append("  spec diff:")
+                    lines.extend(f"    {line}" for line in diff.rstrip("\n").splitlines())
+                else:
+                    lines.append("  spec diff: (no textual change)")
+            except Exception:
+                lines.append("  spec diff: (unable to parse specs from artifact)")
+        elif spec_diff:
+            lines.append("  spec diff:")
+            lines.extend(f"    {line}" for line in str(spec_diff).rstrip("\n").splitlines())
+        else:
+            lines.append("  spec diff: (spec text not stored in artifact)")
+
+    lines.append("")
+    lines.append("=== lineage summary ===")
+    accepted_count = sum(1 for g in lineage if str(g.get("decision", "")).lower() == "accepted")
+    for g in lineage:
+        dec = str(g.get("decision", "unknown")).lower()
+        c = g.get("motivating_cause") or g.get("dominant_cause") or "(no cause)"
+        m_kind = g.get("mutation_kind", "")
+        t_path = g.get("target_path", "")
+        m_str = f"{m_kind} ({t_path})" if t_path else m_kind
+        b_val = g.get("before")
+        a_val = g.get("after")
+        d_val = g.get("delta")
+        if d_val is None and b_val is not None and a_val is not None:
+            d_val = a_val - b_val
+        b_s = _format_scalar(b_val)
+        a_s = _format_scalar(a_val)
+        d_s = _format_delta(d_val)
+        lines.append(
+            f"gen {g.get('generation', 0)}: {c} -> {m_str} | "
+            f"{b_s} -> {a_s} (delta {d_s}) | {dec}"
+        )
+
+    lines.append(f"{accepted_count}/{len(lineage)} generations accepted")
+
+    noise_floor = data.get("noise_floor")
+    if isinstance(noise_floor, dict):
+        std = noise_floor.get("reliability_std")
+        source = noise_floor.get("source", "measured noise floor")
+        if std is not None:
+            lines.append(f"keep threshold: {std:.6f} ({source})")
+    elif isinstance(noise_floor, (int, float)):
+        lines.append(
+            f"keep threshold: {noise_floor:.6f} (measured run-to-run noise floor "
+            "on the root spec, repeats=3 -- not a fixed epsilon)"
+        )
+
+    return "\n".join(lines)
+
+
+def export_lineage_to_dict(
+    report: LineageReport,
+    *,
+    domain: str,
+    task_count: int,
+    backend_name: str,
+    label: str = "",
+) -> dict[str, Any]:
+    """Export a LineageReport to the standard JSON artifact dictionary format."""
+    noise_dict = None
+    if report.noise_floor is not None:
+        noise_dict = {
+            "source": "measured automatically by agent_engineer.loop.run_loop's own default (Evaluator, repeats=3, on the root spec)",
+            "reliability_variance": report.noise_floor**2,
+            "reliability_std": report.noise_floor,
+        }
+    return {
+        "label": label or f"Lineage run on domain {domain}",
+        "backend": backend_name,
+        "domain": domain,
+        "task_count": task_count,
+        "noise_floor": noise_dict,
+        "selection_policy": "run_loop default (noise-aware keep threshold)",
+        "root_spec_id": report.root_spec.spec_id,
+        "final_spec_id": report.final_spec.spec_id,
+        "lineage": [
+            {
+                "generation": record.generation,
+                "motivating_cause": (record.diagnosis.dominant_cause or record.mutation.motivating_cause).value,
+                "mutation_kind": record.mutation.kind.value,
+                "target_path": record.mutation.target_path,
+                "rationale": record.mutation.rationale,
+                "before": record.verdict.before,
+                "after": record.verdict.after,
+                "delta": record.verdict.delta,
+                "decision": record.verdict.decision.value,
+                "reason": record.verdict.reason,
+                "spec_before": record.spec_before.model_dump(mode="json"),
+                "spec_after": record.spec_after.model_dump(mode="json"),
+            }
+            for record in report.generations
+        ],
+    }
 
 
 def run_domain(
@@ -230,6 +427,7 @@ def run_domain(
     backend_name: str = "scripted",
     repeats: int = 3,
     stream: bool = True,
+    output_path: str | Path | None = None,
 ) -> LineageReport:
     if domain not in DOMAIN_NAMES:
         raise SystemExit(
@@ -263,6 +461,19 @@ def run_domain(
     if stream:
         _print(_render_lineage_summary(report))
 
+    if output_path is not None:
+        out_dict = export_lineage_to_dict(
+            report,
+            domain=domain,
+            task_count=len(suite.tasks),
+            backend_name=backend_name,
+        )
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(out_dict, indent=2), encoding="utf-8")
+        if stream:
+            _print(f"\nsaved lineage artifact to {out_p}")
+
     # Results presentation, entirely through agent_engineer.evaluation.report: the
     # engine's own pass_rate/mean_score bookkeeping decided the lineage above,
     # but the numbers shown to a human come from the measurement harness, with
@@ -284,7 +495,7 @@ def run_domain(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-engineer",
-        description="Run the agent-engineer loop against any registered domain, by name.",
+        description="Run the agent-engineer loop against any registered domain, or render saved lineages.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -315,14 +526,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="repeat runs per task for the results table's reliability metric (default: 3, minimum 3)",
     )
     run_parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="save the resulting lineage artifact to a JSON file",
+    )
+    run_parser.add_argument(
         "--quiet", action="store_true", help="suppress streaming output; only print the final report"
     )
+
+    for cmd in ("render", "show"):
+        render_parser = sub.add_parser(cmd, help="render a saved lineage artifact from JSON")
+        render_parser.add_argument("artifact_path", type=str, help="path to JSON lineage artifact")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is not None:
+        args_list = list(argv)
+    else:
+        args_list = sys.argv[1:]
+
+    # Ergonomic shortcuts:
+    # 1. python -m agent_engineer code_math -> python -m agent_engineer run code_math
+    # 2. python -m agent_engineer artifacts/scripted_decision_lineage.json -> python -m agent_engineer render ...
+    if args_list and not args_list[0].startswith("-"):
+        first = args_list[0]
+        if first in DOMAIN_NAMES:
+            args_list = ["run", *args_list]
+        elif first.endswith(".json") or (len(args_list) == 1 and os.path.isfile(first)):
+            args_list = ["render", *args_list]
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
 
     if args.command == "list":
         for name in DOMAIN_NAMES:
@@ -337,7 +575,13 @@ def main(argv: list[str] | None = None) -> int:
             backend_name=args.backend,
             repeats=args.repeats,
             stream=not args.quiet,
+            output_path=args.output,
         )
+        return 0
+
+    if args.command in ("render", "show"):
+        rendered = render_saved_lineage(args.artifact_path)
+        _print(rendered)
         return 0
 
     parser.print_help()
