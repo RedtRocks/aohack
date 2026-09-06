@@ -38,3 +38,14 @@ Rationale behind each proposed mutation:
 - **gen 2** (reverted): Prompt-level guidance did not fix premature_stop, so the loop shape is the constraint: plan_then_execute gives the agent an explicit step for the deliberation it is currently skipping.
 - **gen 3** (reverted): Runs are being cut off at 8 steps before finishing, so the budget is binding on the outcome rather than the agent's competence. Doubling it separates the two.
 - **gen 4** (reverted): Full retention did not stop the context loss, so the problem is finding the relevant earlier fact, not storing it. Retrieval over 6 relevant items targets that directly.
+
+## Analysis and Ladder Status
+
+- **Complete generation execution**: All 4 generations were fully evaluated (16 tasks per generation &times; 4 generations = 64 live generation calls + 48 baseline replicate calls + 16 generation-0 root calls = 128 total calls). None were skipped or truncated.
+- **Why mutations were reverted**:
+  - Gen 1 (system prompt guidance): reduced score from 0.7500 to 0.6000 (delta -0.1500) -> properly reverted.
+  - Gen 2 (strategy change): scored 0.6250 (delta -0.1250) -> properly reverted.
+  - Gen 3 (step budget increase): scored 0.7500 (delta +0.0000) -> properly reverted under noise threshold.
+  - Gen 4 (memory reconfiguration): scored 0.6875 (delta -0.0625) -> properly reverted.
+- **Mutator ladder exhaustion**: For `premature_stop` on a tool-less agent (`tools=()`), `LadderMutator` provides exactly four valid moves (prompt rewrite, strategy escalation, step budget increase, memory reconfiguration). Once all four moves have been proposed and rejected against empirical evaluation, the mutator terminates cleanly (`stop_on_stall=True`).
+- **Headroom vs. Model capability**: Despite 35% theoretical headroom (baseline accuracy 0.6458), generic prompt and architecture mutations were unable to beat the baseline. The final spec correctly reverted to root, preserving baseline reliability and token spend rather than accepting negative or noisy mutations.
