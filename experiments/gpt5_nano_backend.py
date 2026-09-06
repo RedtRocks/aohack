@@ -265,3 +265,50 @@ class CachingBackend:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache_path.write_text(json.dumps(self._cache), encoding="utf-8")
         return action
+
+
+class SpendCapExceeded(RuntimeError):
+    """Raised the instant cumulative spend crosses the configured hard cap.
+    Never caught and retried around -- a crossed cap stops the run."""
+
+
+class MeteringBackend:
+    """Wraps another backend to make spend observable and bounded, call by call.
+
+    Every single call is logged (not just once per phase), and cumulative
+    token spend is checked after every one: crossing ``max_total_tokens``
+    raises :class:`SpendCapExceeded` immediately, mid-run, rather than only
+    finding out how much a phase cost after the fact. This exists because a
+    prior run was killed without anyone -- including this code -- knowing
+    exactly how many of its calls had already landed; this closes that gap.
+    """
+
+    def __init__(self, backend, *, max_total_tokens: int, log=print) -> None:
+        self._backend = backend
+        self._max_total_tokens = max_total_tokens
+        self._log = log
+        self.calls_logged = 0
+
+    @property
+    def calls_made(self) -> int:
+        return getattr(self._backend, "calls_made", 0)
+
+    @property
+    def total_tokens(self) -> int:
+        return getattr(self._backend, "total_tokens", 0)
+
+    def next_action(self, spec, task, tools, history) -> AgentAction:
+        action = self._backend.next_action(spec, task, tools, history)
+        self.calls_logged += 1
+        total = self.total_tokens
+        self._log(
+            f"    [spend] call {self.calls_logged} ({spec.spec_id}::{task.task_id}): "
+            f"+{action.prompt_tokens + action.completion_tokens} tokens, cumulative {total}"
+        )
+        if total > self._max_total_tokens:
+            raise SpendCapExceeded(
+                f"cumulative spend {total} tokens exceeded the cap of "
+                f"{self._max_total_tokens} after call {self.calls_logged} "
+                f"({spec.spec_id}::{task.task_id}); stopping immediately"
+            )
+        return action

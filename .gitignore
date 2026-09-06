@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+artifacts/real_model_call_cache.json

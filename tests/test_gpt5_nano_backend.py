@@ -20,20 +20,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "experiments"))
 
 from gpt5_nano_backend import (  # noqa: E402
     ApiKeyMissing,
+    CachingBackend,
     FallbackBackend,
     GPT5NanoBackend,
+    MeteringBackend,
+    SpendCapExceeded,
     TensorMuxGLMBackend,
 )
 
+from agent_engineer.ports import AgentAction  # noqa: E402
+
 
 class _Task:
-    def __init__(self, prompt: str) -> None:
+    def __init__(self, prompt: str, task_id: str = "task-1") -> None:
         self.prompt = prompt
+        self.task_id = task_id
 
 
 class _Spec:
-    def __init__(self, system_prompt: str) -> None:
+    def __init__(self, system_prompt: str, spec_id: str = "spec-1") -> None:
         self.system_prompt = system_prompt
+        self.spec_id = spec_id
 
 
 def _fake_response(*, content: str, prompt_tokens: int = 12, completion_tokens: int = 7) -> Mock:
@@ -190,3 +197,90 @@ def test_fallback_backend_raises_when_both_providers_fail(monkeypatch):
 
     with pytest.raises(ConnectionError):
         fallback.next_action(_Spec("s"), _Task("u"), (), ())
+
+
+class _StubBackend:
+    """A fake wrapped backend for testing MeteringBackend/CachingBackend in
+    isolation, with no network involved."""
+
+    def __init__(self, tokens_per_call: int = 50) -> None:
+        self.calls_made = 0
+        self.total_tokens = 0
+        self._tokens_per_call = tokens_per_call
+
+    def next_action(self, spec, task, tools, history):
+        self.calls_made += 1
+        self.total_tokens += self._tokens_per_call
+        return AgentAction(
+            final_answer=f"answer-for-{task.task_id}-{self.calls_made}",
+            prompt_tokens=self._tokens_per_call // 2,
+            completion_tokens=self._tokens_per_call - self._tokens_per_call // 2,
+        )
+
+
+def test_metering_backend_logs_every_call_and_tracks_cumulative_spend():
+    stub = _StubBackend(tokens_per_call=50)
+    logged = []
+    metering = MeteringBackend(stub, max_total_tokens=1000, log=logged.append)
+
+    metering.next_action(_Spec("s"), _Task("u", task_id="t1"), (), ())
+    metering.next_action(_Spec("s"), _Task("u", task_id="t2"), (), ())
+
+    assert metering.calls_made == 2
+    assert metering.total_tokens == 100
+    assert len(logged) == 2
+    assert "t1" in logged[0] and "cumulative 50" in logged[0]
+    assert "t2" in logged[1] and "cumulative 100" in logged[1]
+
+
+def test_metering_backend_stops_immediately_when_cap_is_crossed():
+    stub = _StubBackend(tokens_per_call=50)
+    metering = MeteringBackend(stub, max_total_tokens=120, log=lambda _line: None)
+
+    metering.next_action(_Spec("s"), _Task("u", task_id="t1"), (), ())  # 50, under cap
+    metering.next_action(_Spec("s"), _Task("u", task_id="t2"), (), ())  # 100, under cap
+    with pytest.raises(SpendCapExceeded):
+        metering.next_action(_Spec("s"), _Task("u", task_id="t3"), (), ())  # 150, over cap
+
+    # the call that crossed the cap still happened and still counted --
+    # SpendCapExceeded stops the *next* call, not the one already in flight
+    assert stub.calls_made == 3
+    assert metering.total_tokens == 150
+
+
+def test_caching_backend_gives_independent_replicates_distinct_cache_slots(tmp_path):
+    stub = _StubBackend(tokens_per_call=50)
+    caching = CachingBackend(stub, cache_path=tmp_path / "cache.json")
+
+    spec = _Spec("s", spec_id="spec-a")
+    task = _Task("u", task_id="task-a")
+
+    first = caching.next_action(spec, task, (), ())
+    second = caching.next_action(spec, task, (), ())
+    third = caching.next_action(spec, task, (), ())
+
+    # three independent replicate calls -> three real calls, three distinct answers
+    assert stub.calls_made == 3
+    assert {first.final_answer, second.final_answer, third.final_answer} == {
+        "answer-for-task-a-1",
+        "answer-for-task-a-2",
+        "answer-for-task-a-3",
+    }
+
+
+def test_caching_backend_survives_a_rerun_by_reloading_the_cache_file(tmp_path):
+    cache_path = tmp_path / "cache.json"
+    spec = _Spec("s", spec_id="spec-a")
+    task = _Task("u", task_id="task-a")
+
+    stub_one = _StubBackend(tokens_per_call=50)
+    CachingBackend(stub_one, cache_path=cache_path).next_action(spec, task, (), ())
+    assert stub_one.calls_made == 1
+
+    # simulate a crash and rerun: fresh backend instance, fresh CachingBackend,
+    # same cache file on disk -- the call must be replayed, not re-spent
+    stub_two = _StubBackend(tokens_per_call=50)
+    replayed = CachingBackend(stub_two, cache_path=cache_path).next_action(spec, task, (), ())
+
+    assert stub_two.calls_made == 0
+    assert replayed.final_answer == "answer-for-task-a-1"

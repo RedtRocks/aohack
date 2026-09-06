@@ -38,6 +38,7 @@ not set.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,8 +47,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gpt5_nano_backend import (  # noqa: E402
     ApiKeyMissing,
+    CachingBackend,
     FallbackBackend,
     GPT5NanoBackend,
+    MeteringBackend,
+    SpendCapExceeded,
     TensorMuxGLMBackend,
 )
 
@@ -65,6 +69,13 @@ GOAL = "Solve each task exactly, in the exact output format the prompt asks for.
 MAX_GENERATIONS = 4
 NOISE_REPLICATES = 3
 ARTIFACT_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+CACHE_PATH = ARTIFACT_DIR / "real_model_call_cache.json"
+
+DEFAULT_SPEND_CAP_TOKENS = 20_000
+"""Hard cap on cumulative tokens for one run of this script. Overridable via
+the SPEND_CAP_TOKENS env var. Crossing it raises SpendCapExceeded immediately
+-- mid-phase, not just discovered after the fact -- because the keys this
+script spends against are limited and there is no second set."""
 
 
 class _NoTools:
@@ -130,7 +141,17 @@ def main() -> None:
     except ApiKeyMissing as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         raise SystemExit(1)
-    backend = FallbackBackend(primary, secondary)
+
+    spend_cap = int(os.environ.get("SPEND_CAP_TOKENS", DEFAULT_SPEND_CAP_TOKENS))
+    print(f"spend cap for this run: {spend_cap} tokens", flush=True)
+    # every call, real or replayed from cache, is logged and checked against the
+    # cap the instant it happens -- not once per phase, so a kill mid-run leaves
+    # an exact, not estimated, spend figure behind
+    fallback = FallbackBackend(primary, secondary)
+    backend = MeteringBackend(
+        CachingBackend(fallback, cache_path=CACHE_PATH),
+        max_total_tokens=spend_cap,
+    )
 
     tool_runtime = _NoTools()
     suite = get_suite()
@@ -142,64 +163,92 @@ def main() -> None:
         spec_id=SPEC_ID, goal=GOAL, tools=tool_runtime.schemas(), evaluator_id=EVALUATOR_ID
     )
 
-    print(f"[1/5] measuring baseline noise floor: {NOISE_REPLICATES} real replicate suite runs "
-          f"on the root spec ({len(suite.tasks)} tasks each)...", flush=True)
-    baseline_replicates = _replicate_runs(runner, suite, root_spec, n=NOISE_REPLICATES, tag="baseline")
-    baseline_scores = [run.mean_score for run in baseline_replicates]
-    noise_variance = population_variance(baseline_scores)
-    print(f"    baseline mean_score across replicates: {baseline_scores}", flush=True)
-
-    print("[2/5] feeding those same real runs into the frozen Evaluator harness "
-          "for canonical accuracy+cost+reliability...", flush=True)
-    baseline_report = harness.run_iteration(0, root_spec, _replay_runner(baseline_replicates))
-
-    print(f"[3/5] running the real five-stage loop ({MAX_GENERATIONS} generations max)...", flush=True)
-    # run_loop's own default would otherwise measure this same noise floor itself
-    # (another real repeats=3 pass, another len(suite.tasks)*3 calls) -- pass the
-    # floor already measured above explicitly so that measurement is not paid for
-    # twice.
-    noise_floor_std = max(1e-9, noise_variance**0.5)
-    lineage = run_loop(
-        spec_id=SPEC_ID,
-        goal=GOAL,
-        tool_runtime=tool_runtime,
-        backend=backend,
-        evaluator=evaluator,
-        evaluator_id=EVALUATOR_ID,
-        task_suite=suite,
-        max_generations=MAX_GENERATIONS,
-        metric="mean_score",
-        synthesizer=_FixedSpecSynthesizer(root_spec),
-        selection_policy=MinimumDeltaPolicy(min_delta=noise_floor_std),
-    )
-    for line in lineage.summary_lines():
-        print(f"    {line}", flush=True)
-
-    if lineage.final_spec.spec_id != root_spec.spec_id:
-        print("[4/5] measuring the final spec the same way as the baseline...", flush=True)
-        final_replicates = _replicate_runs(
-            runner, suite, lineage.final_spec, n=NOISE_REPLICATES, tag="final"
+    def _write_truncated(reason: str) -> None:
+        """A partial, honestly-labelled result is a perfectly good outcome when
+        the spend cap fires -- crashing with a traceback and nothing saved is not."""
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        partial = {
+            "status": "truncated",
+            "reason": reason,
+            "real_model_calls_made": backend.calls_made,
+            "cumulative_tokens": backend.total_tokens,
+            "primary_calls": fallback.primary_calls,
+            "fallback_calls": fallback.secondary_calls,
+        }
+        (ARTIFACT_DIR / "code_math_gpt5_nano_lineage.json").write_text(
+            json.dumps(partial, indent=2), encoding="utf-8"
         )
-        final_report = harness.run_iteration(1, lineage.final_spec, _replay_runner(final_replicates))
-    else:
-        print("[4/5] no mutation was ever accepted; final spec == root spec, reusing baseline.",
-              flush=True)
-        final_replicates = baseline_replicates
-        final_report = baseline_report
+        print(f"TRUNCATED: {reason}", file=sys.stderr)
+        print(f"  calls made: {backend.calls_made} ({fallback.primary_calls} primary / "
+              f"{fallback.secondary_calls} fallback), cumulative tokens: {backend.total_tokens}",
+              file=sys.stderr)
+
+    try:
+        print(f"[1/5] measuring baseline noise floor: {NOISE_REPLICATES} real replicate suite runs "
+              f"on the root spec ({len(suite.tasks)} tasks each)...", flush=True)
+        baseline_replicates = _replicate_runs(runner, suite, root_spec, n=NOISE_REPLICATES, tag="baseline")
+        baseline_scores = [run.mean_score for run in baseline_replicates]
+        noise_variance = population_variance(baseline_scores)
+        print(f"    baseline mean_score across replicates: {baseline_scores}", flush=True)
+        print(f"    cumulative spend so far: {backend.total_tokens} tokens", flush=True)
+
+        print("[2/5] feeding those same real runs into the frozen Evaluator harness "
+              "for canonical accuracy+cost+reliability...", flush=True)
+        baseline_report = harness.run_iteration(0, root_spec, _replay_runner(baseline_replicates))
+
+        print(f"[3/5] running the real five-stage loop ({MAX_GENERATIONS} generations max)...", flush=True)
+        # run_loop's own default would otherwise measure this same noise floor itself
+        # (another real repeats=3 pass, another len(suite.tasks)*3 calls) -- pass the
+        # floor already measured above explicitly so that measurement is not paid for
+        # twice.
+        noise_floor_std = max(1e-9, noise_variance**0.5)
+        lineage = run_loop(
+            spec_id=SPEC_ID,
+            goal=GOAL,
+            tool_runtime=tool_runtime,
+            backend=backend,
+            evaluator=evaluator,
+            evaluator_id=EVALUATOR_ID,
+            task_suite=suite,
+            max_generations=MAX_GENERATIONS,
+            metric="mean_score",
+            synthesizer=_FixedSpecSynthesizer(root_spec),
+            selection_policy=MinimumDeltaPolicy(min_delta=noise_floor_std),
+        )
+        for line in lineage.summary_lines():
+            print(f"    {line}", flush=True)
+        print(f"    cumulative spend so far: {backend.total_tokens} tokens", flush=True)
+
+        if lineage.final_spec.spec_id != root_spec.spec_id:
+            print("[4/5] measuring the final spec the same way as the baseline...", flush=True)
+            final_replicates = _replicate_runs(
+                runner, suite, lineage.final_spec, n=NOISE_REPLICATES, tag="final"
+            )
+            final_report = harness.run_iteration(1, lineage.final_spec, _replay_runner(final_replicates))
+        else:
+            print("[4/5] no mutation was ever accepted; final spec == root spec, reusing baseline.",
+                  flush=True)
+            final_replicates = baseline_replicates
+            final_report = baseline_report
+    except SpendCapExceeded as error:
+        _write_truncated(str(error))
+        raise SystemExit(1)
 
     print(f"[5/5] writing artifact ({backend.calls_made} real model calls made total: "
-          f"{backend.primary_calls} primary / {backend.secondary_calls} fallback)...", flush=True)
+          f"{fallback.primary_calls} primary / {fallback.secondary_calls} fallback, "
+          f"{backend.total_tokens} cumulative tokens)...", flush=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     artifact = {
         "primary_model": "glm-4-7-flash (via TensorMux)",
         "fallback_model": "gpt-5-nano (via OpenAI)",
-        "primary_calls": backend.primary_calls,
-        "fallback_calls": backend.secondary_calls,
+        "primary_calls": fallback.primary_calls,
+        "fallback_calls": fallback.secondary_calls,
         "domain": DOMAIN,
         "spec_id": SPEC_ID,
         "goal": GOAL,
         "task_count": len(suite.tasks),
         "real_model_calls_made": backend.calls_made,
+        "cumulative_tokens": backend.total_tokens,
         "noise_floor": {
             "metric": "mean_score",
             "replicate_scores": baseline_scores,
