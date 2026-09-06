@@ -1,0 +1,101 @@
+{
+  "primary_model": "glm-4-7-flash (via TensorMux)",
+  "fallback_model": "gpt-5-nano (via OpenAI)",
+  "primary_calls": 126,
+  "fallback_calls": 0,
+  "domain": "extraction",
+  "spec_id": "extraction-gpt5-nano",
+  "goal": "Solve each task exactly, in the exact output format the prompt asks for.",
+  "baseline_synthesizer": "naive",
+  "baseline_statement": "We start from a naive baseline so that improvement is measurable. Generation zero is a bare system prompt (the goal string, verbatim, and nothing else -- no tool listing, no worked examples, no 'how to work' scaffolding), single_shot strategy, memory kind none, and a minimal one-step stopping condition. This is a deliberate experimental choice, not the strongest agent we could build: TemplateSynthesizer's own default prompt already tells the model to check tool errors and stop only once complete, which leaves little headroom for the loop's early mutations to visibly improve on. This baseline is weaker on purpose.",
+  "task_count": 14,
+  "real_model_calls_made": 126,
+  "cumulative_tokens": 86885,
+  "noise_floor": {
+    "metric": "mean_score",
+    "replicate_scores": [
+      0.9278911428571428,
+      0.9278911428571428,
+      0.9136054285714286
+    ],
+    "population_variance": 4.535147392290217e-05,
+    "population_std": 0.006734350297014714,
+    "replicates": 3
+  },
+  "baseline": {
+    "accuracy": {
+      "value": 0.8571428571428571,
+      "sample_size": 42,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.03174603174603175,
+      "sample_size": 14,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 493.3809523809524,
+      "sample_size": 42,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 3.3072173738094404,
+      "sample_size": 42,
+      "reason": null
+    },
+    "task_count": 14,
+    "repeats": 3
+  },
+  "final": {
+    "accuracy": {
+      "value": 0.8571428571428571,
+      "sample_size": 42,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.03174603174603175,
+      "sample_size": 14,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 846.2857142857143,
+      "sample_size": 42,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 4.060869783333449,
+      "sample_size": 42,
+      "reason": null
+    },
+    "task_count": 14,
+    "repeats": 3
+  },
+  "lineage": [
+    {
+      "generation": 1,
+      "motivating_cause": "output_format_violation",
+      "mutation_kind": "system_prompt_rewrite",
+      "target_path": "system_prompt",
+      "before": 0.9278911428571428,
+      "after": 0.9517007142857142,
+      "delta": 0.02380957142857143,
+      "decision": "accepted",
+      "within_noise_floor": false,
+      "rationale": "The dominant cause is output_format_violation. Adding explicit behavioural guidance for it is the smallest edit that can change the agent's conduct at the step where it fails."
+    },
+    {
+      "generation": 2,
+      "motivating_cause": "output_format_violation",
+      "mutation_kind": "strategy_changed",
+      "target_path": "strategy",
+      "before": 0.9517007142857142,
+      "after": 0.9397959285714286,
+      "delta": -0.01190478571428566,
+      "decision": "reverted",
+      "within_noise_floor": false,
+      "rationale": "Prompt-level guidance did not fix output_format_violation, so the loop shape is the constraint: react gives the agent an explicit step for the deliberation it is currently skipping."
+    }
+  ],
+  "root_spec_id": "extraction-gpt5-nano",
+  "final_spec_id": "extraction-gpt5-nano-g1"
+}
