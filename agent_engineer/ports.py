@@ -1,20 +1,26 @@
 """The interfaces the engine consumes from the outside world.
 
 Everything domain-specific enters the engine through this module and nowhere
-else. The engine itself imports only the standard library, pydantic, and
-:mod:`agent_engineer`; a domain reaches it as an object satisfying one of the
-protocols below, handed in by the caller.
+else. The engine itself imports only the standard library, pydantic,
+:mod:`agent_engineer.schemas`, and the measurement package; a domain reaches it
+as an object satisfying one of the protocols below, handed in by the caller.
 
-Four ports:
+Two halves, with a firm line between them:
 
-* :class:`Task` / :class:`TaskSet` -- what the agent is asked to do.
-* :class:`Evaluator` -- whether it did it. Owned by the measurement side.
-* :class:`ToolRuntime` -- the tools it may call, and what happens when it does.
-* :class:`ModelBackend` -- what decides the next action.
+* **Measurement's, not ours.** ``TaskSpec``, ``DomainSuite`` and
+  ``TaskEvaluator`` are defined in :mod:`agent_engineer.evaluation` and
+  documented in ``agent_engineer/evaluation/INTERFACE.md``. They are re-exported
+  here for convenience only. The engine does not define them, extend them, or
+  grade anything itself.
+* **Ours.** ``ToolSchema``, ``ToolResult``, ``ToolRuntime``, ``AgentAction``,
+  ``ModelBackend`` and ``TextGenerator`` are agent-execution concerns. They
+  describe how a candidate agent acts, which is the engine's business.
 
-The protocols are structural and ``runtime_checkable``, so a domain package
-satisfies them by shape alone: nothing on the domain side needs to import the
-engine, and the engine never needs to name a domain.
+The engine supplies the harness exactly one callable, :class:`TaskRunner`:
+``(spec, task, attempt) -> Trajectory``. It may raise; a raised run is the
+harness's to record as a failure. The returned trajectory must carry
+``tokens`` and ``elapsed_seconds``, since cost and speed are read from those
+fields and nowhere else.
 """
 
 from __future__ import annotations
@@ -23,51 +29,69 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent_engineer.schemas import AgentSpec, EvaluatorVerdict, ToolCall
+from agent_engineer.schemas import AgentSpec, ToolCall, Trajectory
+
+try:  # pragma: no cover - exercised by whichever half of the tree is present
+    from agent_engineer.evaluation import DomainSuite, TaskEvaluator, TaskSpec
+except ImportError:  # pragma: no cover
+    # The measurement package has not landed on this branch yet. These stand-ins
+    # exist so the engine can be developed and tested against the agreed shape;
+    # they are deleted, not merged, the moment agent_engineer.evaluation is on
+    # integration. Nothing here grades, aggregates, or counts anything.
+
+    @runtime_checkable
+    class TaskSpec(Protocol):  # type: ignore[no-redef]
+        """One unit of work. ``metadata`` carries domain fixtures, opaque to the engine."""
+
+        @property
+        def task_id(self) -> str: ...
+
+        @property
+        def prompt(self) -> str: ...
+
+        @property
+        def metadata(self) -> dict[str, Any]: ...
+
+    @runtime_checkable
+    class DomainSuite(Protocol):  # type: ignore[no-redef]
+        """A named, re-iterable set of tasks for one domain."""
+
+        @property
+        def suite_id(self) -> str: ...
+
+        @property
+        def tasks(self) -> tuple[TaskSpec, ...]: ...
+
+    @runtime_checkable
+    class TaskEvaluator(Protocol):  # type: ignore[no-redef]
+        """Grades one finished trajectory. Grades only -- never counts or averages."""
+
+        def __call__(self, task: TaskSpec, trajectory: Trajectory) -> Any: ...
+
+
+__all__ = [
+    "TaskSpec",
+    "DomainSuite",
+    "TaskEvaluator",
+    "TaskRunner",
+    "ToolSchema",
+    "ToolResult",
+    "ToolRuntime",
+    "AgentAction",
+    "ModelBackend",
+    "TextGenerator",
+]
 
 
 @runtime_checkable
-class Task(Protocol):
-    """One unit of work handed to an agent.
+class TaskRunner(Protocol):
+    """What the engine hands the harness: one spec, one task, one attempt, one trajectory.
 
-    ``prompt`` is the only text the engine reads, and it is passed through
-    verbatim -- the engine never inspects or rewrites it, so the domain keeps
-    full control of what its tasks say.
+    ``attempt`` distinguishes repeat runs of the same pair, so the harness can
+    ask for several samples and the trajectory ids stay distinct.
     """
 
-    @property
-    def task_id(self) -> str: ...
-
-    @property
-    def prompt(self) -> str: ...
-
-
-@runtime_checkable
-class TaskSet(Protocol):
-    """A named, ordered, re-iterable collection of :class:`Task`.
-
-    Held-out splits are the domain's business: the engine evaluates whatever
-    set it is given and compares like against like across generations.
-    """
-
-    @property
-    def task_set_id(self) -> str: ...
-
-    def tasks(self) -> tuple[Task, ...]: ...
-
-
-@runtime_checkable
-class Evaluator(Protocol):
-    """Judges one finished run. Owned by the measurement side.
-
-    The engine calls this once per trajectory and stores the verdict verbatim;
-    it never second-guesses a score or re-derives ``passed``.
-    """
-
-    @property
-    def evaluator_id(self) -> str: ...
-
-    def evaluate(self, task: Task, final_answer: str | None, tool_calls: tuple[ToolCall, ...]) -> EvaluatorVerdict: ...
+    def __call__(self, spec: AgentSpec, task: TaskSpec, attempt: int) -> Trajectory: ...
 
 
 class ToolSchema(BaseModel):
@@ -77,11 +101,13 @@ class ToolSchema(BaseModel):
 
     name: str = Field(min_length=1)
     description: str = ""
-    parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+    parameters: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
 
 
 class ToolResult(BaseModel):
-    """What a tool returned. Exactly one of ``value`` or ``error`` is meaningful."""
+    """What a tool returned. ``error`` set means the call failed and ``value`` is ignored."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -99,7 +125,7 @@ class ToolRuntime(Protocol):
 
     def schemas(self) -> tuple[ToolSchema, ...]: ...
 
-    def invoke(self, task: Task, tool_name: str, args: dict[str, Any]) -> ToolResult: ...
+    def invoke(self, task: TaskSpec, tool_name: str, args: dict[str, Any]) -> ToolResult: ...
 
 
 class AgentAction(BaseModel):
@@ -123,14 +149,14 @@ class AgentAction(BaseModel):
 class ModelBackend(Protocol):
     """Decides the next action given the spec, the task, and what has happened so far.
 
-    The backend receives the spec's system prompt and strategy and is expected
-    to honour them; it is the only component that needs to talk to a model.
+    The backend receives the spec's system prompt, tool list and strategy and is
+    expected to honour them; it is the only component that needs a model.
     """
 
     def next_action(
         self,
         spec: AgentSpec,
-        task: Task,
+        task: TaskSpec,
         tools: tuple[ToolSchema, ...],
         history: tuple[ToolCall, ...],
     ) -> AgentAction: ...
@@ -140,9 +166,8 @@ class ModelBackend(Protocol):
 class TextGenerator(Protocol):
     """Free-form text completion, used by the model-assisted stage implementations.
 
-    Kept separate from :class:`ModelBackend` so the loop can run its stages with
-    a real model while the agent under test runs on something else, or vice
-    versa, or with neither.
+    Kept separate from :class:`ModelBackend` so the loop's own stages can use a
+    model while the agent under test runs on something else, or on neither.
     """
 
     def complete(self, system: str, prompt: str) -> str: ...

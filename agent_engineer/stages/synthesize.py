@@ -1,18 +1,23 @@
 """Stage 1: synthesize an :class:`AgentSpec` from a goal, tool schemas, and an evaluator.
 
 The synthesized system prompt is assembled from material the *caller* supplies
--- the goal string, the tool schemas, and the evaluator's own description of
-what it rewards. The engine contributes only structural scaffolding that is
-true of any agent in any domain ("call a tool or give a final answer", "do not
-invent a tool that is not listed"). There is no domain vocabulary here, and
+-- the goal string, the tool schemas, and an optional prose description of what
+the evaluator rewards. The engine contributes only structural scaffolding that
+is true of any agent in any domain ("call a tool or give a final answer", "do
+not invent a tool that is not listed"). There is no domain vocabulary here, and
 adding any would invalidate the result this project is claiming.
+
+A :class:`~agent_engineer.ports.TaskEvaluator` is a plain grading callable, so
+this stage does not depend on it structurally: callers identify it by
+``evaluator_id`` and may pass ``criteria`` prose alongside, but nothing here
+inspects or calls the evaluator itself.
 """
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from agent_engineer.ports import Evaluator, TextGenerator, ToolSchema
+from agent_engineer.ports import TextGenerator, ToolSchema
 from agent_engineer.schemas import (
     AgentSpec,
     MemoryConfig,
@@ -34,7 +39,8 @@ class SpecSynthesizer(Protocol):
         spec_id: str,
         goal: str,
         tools: tuple[ToolSchema, ...],
-        evaluator: Evaluator,
+        evaluator_id: str,
+        criteria: str = "",
     ) -> AgentSpec: ...
 
 
@@ -82,15 +88,6 @@ def compose_system_prompt(
     return "\n".join(sections)
 
 
-def _evaluator_criteria(evaluator: Evaluator) -> str:
-    """Read an optional self-description off the evaluator. Absent is fine."""
-    for attribute in ("criteria", "description", "rubric"):
-        value = getattr(evaluator, attribute, None)
-        if isinstance(value, str) and value.strip():
-            return value
-    return ""
-
-
 class TemplateSynthesizer:
     """Deterministic synthesis: no model call, fully reproducible.
 
@@ -116,17 +113,15 @@ class TemplateSynthesizer:
         spec_id: str,
         goal: str,
         tools: tuple[ToolSchema, ...],
-        evaluator: Evaluator,
+        evaluator_id: str,
+        criteria: str = "",
     ) -> AgentSpec:
         if not goal.strip():
             raise ValueError("goal must not be blank")
         return AgentSpec(
             spec_id=spec_id,
             system_prompt=compose_system_prompt(
-                goal=goal,
-                tools=tools,
-                evaluator_id=evaluator.evaluator_id,
-                criteria=_evaluator_criteria(evaluator),
+                goal=goal, tools=tools, evaluator_id=evaluator_id, criteria=criteria
             ),
             tools=tuple(tool.name for tool in tools),
             strategy=self._strategy,
@@ -161,10 +156,15 @@ class ModelSynthesizer:
         spec_id: str,
         goal: str,
         tools: tuple[ToolSchema, ...],
-        evaluator: Evaluator,
+        evaluator_id: str,
+        criteria: str = "",
     ) -> AgentSpec:
         baseline = self._fallback.synthesize(
-            spec_id=spec_id, goal=goal, tools=tools, evaluator=evaluator
+            spec_id=spec_id,
+            goal=goal,
+            tools=tools,
+            evaluator_id=evaluator_id,
+            criteria=criteria,
         )
         request = "\n".join(
             [
@@ -174,8 +174,8 @@ class ModelSynthesizer:
                 "Tools:",
                 *(_render_tool(tool) for tool in tools),
                 "",
-                f"The final answer is judged by evaluator {evaluator.evaluator_id!r}.",
-                _evaluator_criteria(evaluator),
+                f"The final answer is judged by evaluator {evaluator_id!r}.",
+                criteria,
                 "",
                 "Write the system prompt.",
             ]

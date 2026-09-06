@@ -10,6 +10,11 @@ Stopping is enforced here rather than trusted to the model: the spec's
 :class:`StoppingConditions` are checked before every step, and why the loop
 halted is preserved in :class:`RunRecord.stop_reason` -- which is what lets
 stage 3 tell a budget exhaustion apart from an agent that simply gave up.
+
+Grading happens through a :class:`~agent_engineer.ports.TaskEvaluator`
+supplied by the measurement side; this stage calls it once per trajectory and
+stores the verdict verbatim, and it is also what :meth:`TrajectoryRunner.as_task_runner`
+exposes to the measurement harness as a :class:`~agent_engineer.ports.TaskRunner`.
 """
 
 from __future__ import annotations
@@ -20,10 +25,10 @@ from enum import Enum
 
 from agent_engineer.ports import (
     AgentAction,
-    Evaluator,
+    DomainSuite,
     ModelBackend,
-    Task,
-    TaskSet,
+    TaskEvaluator,
+    TaskSpec,
     ToolRuntime,
 )
 from agent_engineer.schemas import AgentSpec, TokenUsage, ToolCall, Trajectory
@@ -76,7 +81,13 @@ class EvaluationRun:
 
     @property
     def pass_rate(self) -> float:
-        """Fraction of evaluated runs that passed. 0.0 over an empty set."""
+        """Fraction of evaluated runs that passed. 0.0 over an empty set.
+
+        This is the engine's own bookkeeping for stage 3 and stage 5, over the
+        verdicts the measurement evaluator produced -- it is not, itself, a
+        metric the engine invents; it never averages anything the evaluator
+        did not already score per trajectory.
+        """
         evaluated = [t for t in self.trajectories if t.verdict is not None]
         if not evaluated:
             return 0.0
@@ -107,14 +118,14 @@ class TrajectoryRunner:
     """Runs specs against tasks and hands each finished run to the evaluator."""
 
     def __init__(
-        self, backend: ModelBackend, tool_runtime: ToolRuntime, evaluator: Evaluator
+        self, backend: ModelBackend, tool_runtime: ToolRuntime, evaluator: TaskEvaluator
     ) -> None:
         self._backend = backend
         self._tools = tool_runtime
         self._evaluator = evaluator
 
     def run_task(
-        self, spec: AgentSpec, task: Task, *, trajectory_id: str | None = None
+        self, spec: AgentSpec, task: TaskSpec, *, trajectory_id: str | None = None
     ) -> RunRecord:
         """Run one task to completion and return its recorded, evaluated trajectory."""
         exposed = set(spec.tools)
@@ -179,11 +190,12 @@ class TrajectoryRunner:
             tokens=TokenUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
             elapsed_seconds=time.monotonic() - started,
             final_answer=final_answer,
-            verdict=self._evaluator.evaluate(task, final_answer, tuple(calls)),
         )
+        verdict = self._evaluator(task, trajectory)
+        trajectory = trajectory.model_copy(update={"verdict": verdict})
         return RunRecord(trajectory=trajectory, stop_reason=stop_reason)
 
-    def _invoke(self, task: Task, action: AgentAction, *, ordinal: int) -> ToolCall:
+    def _invoke(self, task: TaskSpec, action: AgentAction, *, ordinal: int) -> ToolCall:
         if action.tool_name is None:
             raise ValueError("_invoke requires a tool-calling action")
         call_started = time.monotonic()
@@ -207,18 +219,28 @@ class TrajectoryRunner:
             ),
         )
 
-    def run_task_set(
-        self, spec: AgentSpec, task_set: TaskSet, *, generation: int = 0
+    def run_suite(
+        self, spec: AgentSpec, suite: DomainSuite, *, generation: int = 0
     ) -> EvaluationRun:
-        """Run every task in the set. Trajectory ids are unique per generation."""
+        """Run every task in the suite. Trajectory ids are unique per generation."""
         records = tuple(
             self.run_task(
                 spec,
                 task,
                 trajectory_id=f"g{generation}::{spec.spec_id}::{task.task_id}",
             )
-            for task in task_set.tasks()
+            for task in suite.tasks
         )
-        return EvaluationRun(
-            spec_id=spec.spec_id, task_set_id=task_set.task_set_id, records=records
-        )
+        return EvaluationRun(spec_id=spec.spec_id, task_set_id=suite.suite_id, records=records)
+
+    def as_task_runner(self):
+        """Expose this runner as the :class:`~agent_engineer.ports.TaskRunner` callable
+        the measurement harness drives directly: ``(spec, task, attempt) -> Trajectory``.
+        """
+
+        def run(spec: AgentSpec, task: TaskSpec, attempt: int) -> Trajectory:
+            return self.run_task(
+                spec, task, trajectory_id=f"{spec.spec_id}::{task.task_id}::attempt{attempt}"
+            ).trajectory
+
+        return run
