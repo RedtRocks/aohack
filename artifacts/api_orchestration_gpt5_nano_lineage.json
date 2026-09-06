@@ -1,0 +1,123 @@
+{
+  "primary_model": "glm-4-7-flash (via TensorMux)",
+  "fallback_model": "gpt-5-nano (via OpenAI)",
+  "primary_calls": 96,
+  "fallback_calls": 0,
+  "domain": "api_orchestration",
+  "spec_id": "api-orchestration-gpt5-nano",
+  "goal": "Solve each task exactly, in the exact output format the prompt asks for.",
+  "task_count": 12,
+  "real_model_calls_made": 96,
+  "cumulative_tokens": 24212,
+  "noise_floor": {
+    "metric": "mean_score",
+    "replicate_scores": [
+      0.029166666666666664,
+      0.05833333333333333,
+      0.17499999999999996
+    ],
+    "population_variance": 0.0039699074074074055,
+    "population_std": 0.06300720123452085,
+    "replicates": 3
+  },
+  "baseline": {
+    "accuracy": {
+      "value": 0.0,
+      "sample_size": 36,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.0,
+      "sample_size": 12,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 234.66666666666666,
+      "sample_size": 36,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 3.228192913889062,
+      "sample_size": 36,
+      "reason": null
+    },
+    "task_count": 12,
+    "repeats": 3
+  },
+  "final": {
+    "accuracy": {
+      "value": 0.0,
+      "sample_size": 36,
+      "reason": null
+    },
+    "reliability": {
+      "value": 0.0,
+      "sample_size": 12,
+      "reason": null
+    },
+    "cost_tokens": {
+      "value": 234.66666666666666,
+      "sample_size": 36,
+      "reason": null
+    },
+    "speed_seconds": {
+      "value": 3.228192913889062,
+      "sample_size": 36,
+      "reason": null
+    },
+    "task_count": 12,
+    "repeats": 3
+  },
+  "lineage": [
+    {
+      "generation": 1,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "system_prompt_rewrite",
+      "target_path": "system_prompt",
+      "before": 0.08749999999999998,
+      "after": 0.11666666666666665,
+      "delta": 0.029166666666666674,
+      "decision": "reverted",
+      "within_noise_floor": true,
+      "rationale": "The dominant cause is premature_stop. Adding explicit behavioural guidance for it is the smallest edit that can change the agent's conduct at the step where it fails."
+    },
+    {
+      "generation": 2,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "strategy_changed",
+      "target_path": "strategy",
+      "before": 0.08749999999999998,
+      "after": 0.08749999999999998,
+      "delta": 0.0,
+      "decision": "reverted",
+      "within_noise_floor": true,
+      "rationale": "Prompt-level guidance did not fix premature_stop, so the loop shape is the constraint: plan_then_execute gives the agent an explicit step for the deliberation it is currently skipping."
+    },
+    {
+      "generation": 3,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "stopping_adjusted",
+      "target_path": "stopping.max_steps",
+      "before": 0.08749999999999998,
+      "after": 0.11666666666666665,
+      "delta": 0.029166666666666674,
+      "decision": "reverted",
+      "within_noise_floor": true,
+      "rationale": "Runs are being cut off at 8 steps before finishing, so the budget is binding on the outcome rather than the agent's competence. Doubling it separates the two."
+    },
+    {
+      "generation": 4,
+      "motivating_cause": "premature_stop",
+      "mutation_kind": "memory_reconfigured",
+      "target_path": "memory.kind",
+      "before": 0.08749999999999998,
+      "after": 0.08749999999999998,
+      "delta": 0.0,
+      "decision": "reverted",
+      "within_noise_floor": true,
+      "rationale": "Full retention did not stop the context loss, so the problem is finding the relevant earlier fact, not storing it. Retrieval over 6 relevant items targets that directly."
+    }
+  ],
+  "root_spec_id": "api-orchestration-gpt5-nano",
+  "final_spec_id": "api-orchestration-gpt5-nano"
+}
