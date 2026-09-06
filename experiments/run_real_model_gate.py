@@ -59,6 +59,7 @@ from gpt5_nano_backend import (  # noqa: E402
 import agent_engineer.domains as domain_registry  # noqa: E402
 from agent_engineer.domains.code_math import EVALUATOR_ID as CM_EVALUATOR_ID  # noqa: E402
 from agent_engineer.domains.api_orchestration.evaluator import EVALUATOR_ID as AO_EVALUATOR_ID  # noqa: E402
+from api_orchestration_runtime import ApiOrchestrationToolRuntime  # noqa: E402
 from agent_engineer.domains.extraction.evaluator import EVALUATOR_ID as EX_EVALUATOR_ID  # noqa: E402
 from agent_engineer.evaluation import DomainSuite, Evaluator  # noqa: E402
 from agent_engineer.evaluation.metrics import population_variance  # noqa: E402
@@ -268,12 +269,19 @@ def main() -> None:
         max_total_tokens=spend_cap,
     )
 
-    tool_runtime = _NoTools()
     full_suite = domain_registry.get_suite(domain)
     if max_tasks is not None:
         suite = DomainSuite(domain=full_suite.domain, tasks=full_suite.tasks[:max_tasks])
     else:
         suite = full_suite
+    # api_orchestration's tasks are only solvable through the tools in their own
+    # metadata (per tasks.py); ApiOrchestrationToolRuntime is that domain's own
+    # ToolRuntime adapter, wired in the same shape mcp_everything's MCPToolRuntime
+    # would be. Every other domain here answers directly, no tools exposed.
+    if domain == "api_orchestration":
+        tool_runtime = ApiOrchestrationToolRuntime(suite.tasks)
+    else:
+        tool_runtime = _NoTools()
     evaluator = domain_registry.get_evaluator(domain)
     evaluator_id = EVALUATOR_IDS[domain]
     runner = TrajectoryRunner(backend=backend, tool_runtime=tool_runtime, evaluator=evaluator)
