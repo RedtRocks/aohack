@@ -20,6 +20,89 @@ from agent_engineer.cli import ScriptedBackend, _render_generation, main, run_do
 from agent_engineer.domains import DOMAIN_NAMES
 from agent_engineer.evaluation.report import Improvement
 from agent_engineer.evaluation.metrics import Metric, undefined
+from agent_engineer.loop import GenerationRecord
+from agent_engineer.schemas import AgentSpec, Diagnosis, FailureCause, Mutation, MutationKind
+from agent_engineer.stages.evaluate import EvaluationRun
+from agent_engineer.stages.select import Decision, Verdict
+
+
+def _bare_spec(spec_id: str, *, parent: str | None = None) -> AgentSpec:
+    return AgentSpec(spec_id=spec_id, system_prompt="You are an agent.", parent_spec_id=parent)
+
+
+def _bare_record(*, before: float, after: float, min_delta: float = 1e-9) -> GenerationRecord:
+    """A minimal, hand-built GenerationRecord -- no loop run needed -- so the
+    rendering can be checked against deltas the real loop may or may not ever
+    happen to produce on a given day (negative, or too small to clear the
+    keep threshold), without depending on a scripted backend to manufacture
+    one."""
+    diagnosis = Diagnosis(diagnosis_id="diag-0", spec_id="root", attributions=())
+    mutation = Mutation(
+        mutation_id="mut-0",
+        kind=MutationKind.SYSTEM_PROMPT_REWRITE,
+        target_path="system_prompt",
+        before="old text",
+        after="new text",
+        rationale="test fixture",
+        motivating_diagnosis=diagnosis,
+        motivating_cause=FailureCause.FAULTY_REASONING,
+        parent_spec_id="root",
+        child_spec_id="root-g1",
+    )
+    delta = after - before
+    decision = Decision.ACCEPTED if delta >= min_delta else Decision.REVERTED
+    verdict = Verdict(
+        decision=decision,
+        before=before,
+        after=after,
+        reason=f"measured {before:.4f} -> {after:.4f} (delta {delta:+.4f})",
+    )
+    empty_run = EvaluationRun(spec_id="root", task_set_id="fixture-suite", records=())
+    return GenerationRecord(
+        generation=1,
+        mutation=mutation,
+        diagnosis=diagnosis,
+        evaluation_before=empty_run,
+        evaluation_after=empty_run,
+        verdict=verdict,
+        spec_before=_bare_spec("root"),
+        spec_after=_bare_spec("root-g1", parent="root"),
+    )
+
+
+def test_lineage_view_renders_a_negative_delta_as_reverted() -> None:
+    """A mutation that measures worse than its parent: negative delta, reverted.
+
+    Nothing in the display code may assume a delta is non-negative -- this
+    proves it isn't just untested, it actually renders correctly.
+    """
+    record = _bare_record(before=0.70, after=0.55)
+    assert record.verdict.delta < 0
+    assert not record.accepted
+    rendered = _render_generation(record)
+    assert "REVERTED" in rendered
+    assert "-0.1500" in rendered
+    assert "0.7000 -> 0.5500" in rendered
+
+
+def test_lineage_view_reverts_a_delta_too_small_to_clear_the_keep_threshold() -> None:
+    """A tiny positive delta -- smaller than what a selection policy treats as
+    real movement -- must still revert and render as reverted, not as a win."""
+    record = _bare_record(before=0.50, after=0.5000000001, min_delta=1e-6)
+    assert 0 < record.verdict.delta < 1e-6
+    assert not record.accepted
+    rendered = _render_generation(record)
+    assert "REVERTED" in rendered
+
+
+def test_lineage_view_renders_an_accepted_positive_delta() -> None:
+    """The positive case still has to render correctly alongside the negative
+    and sub-threshold ones -- the display code treats none of them specially."""
+    record = _bare_record(before=0.40, after=0.60)
+    assert record.accepted
+    rendered = _render_generation(record)
+    assert "ACCEPTED" in rendered
+    assert "+0.2000" in rendered
 
 
 @pytest.mark.parametrize("domain", DOMAIN_NAMES)

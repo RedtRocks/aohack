@@ -3,17 +3,30 @@
 Honest accounting of what this build has actually measured. Read this before
 citing any number this CLI prints, or any chart built from one.
 
-## No live-model run will happen in this environment. Full stop.
+## Live-model status: a real run is in progress; not landed in this document yet
 
-This is not "not yet" -- there is no reachable API key in this environment,
-and none is coming. **Every number produced by this project, in its test
-suite and in every CLI run, comes from a scripted backend, never from a live
-LLM agent.** `agent_engineer.cli.AnthropicBackend` exists in the source and is
-reachable via `--backend anthropic`, but it has never executed here and will
-not: treat it as documentation of the intended integration point, not as a
-tested code path. Nothing in this repository should be read, presented, or
-charted as evidence that a live model's performance changed, because no live
-model has run.
+This section has changed once already and may change again -- read the date
+context, not just the words, if you're comparing against an older copy.
+
+As of this writing, API keys have been supplied directly and a live run
+against GLM 4.7 Flash (with a smaller "nano" model as fallback) is in
+progress against the real `code_math` domain, run separately from this CLI.
+**No real numbers from that run have landed in this repository yet.** Nothing
+below should be read as if they had: every number this CLI itself has printed,
+in every run it has done so far, still comes from a scripted backend
+(`agent_engineer.cli.ScriptedBackend`), on all three domains, with no
+exception. `agent_engineer.cli.AnthropicBackend` exists in the source and is
+reachable via `--backend anthropic`, and is no longer a dead code path in
+principle -- a key is reachable in the environment now -- but it has not
+been exercised through this CLI, and no run through it is reported here.
+
+Once real numbers land, this section will say, **per domain**, which numbers
+came from a live model and which still come from a scripted backend --
+because different domains may end up measured differently, and a document
+that says "live" once at the top and stops distinguishing after that is not
+honest about a partial result. If the live run fails, times out, or is cut
+short, this section says that plainly instead: a run that didn't finish is
+not evidence either way, and is not something to round up.
 
 **What the scripted runs DO establish, and it is a real result:**
 
@@ -41,11 +54,14 @@ model has run.
 **What the scripted runs do NOT establish, and no output here should imply
 otherwise:**
 
-- That an LLM agent's performance improved. No LLM agent ran. A scripted
+- That an LLM agent's performance improved, from anything printed by this
+  CLI. No LLM agent has run through this CLI as of this writing. A scripted
   backend answering a fixed hash of a task id correctly is not a model getting
   better at a task; it is a stand-in confirming the plumbing that would carry
   a model's improvement, if there were one, without inventing the improvement
-  itself.
+  itself. (A live run against a real model is in progress elsewhere, on
+  `code_math`, outside this CLI -- see the status note above for what has and
+  has not landed here.)
 - Whether the mutations the ladder proposes (system-prompt rewrites, strategy
   changes, memory reconfiguration, budget adjustments) would change a real
   model's behavior in the direction their rationale claims.
