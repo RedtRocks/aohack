@@ -12,6 +12,23 @@ Full empirical evidence, noise analysis, and failure traces are documented in [*
 
 ---
 
+## Setup
+
+Exact commands for a fresh clone on Windows:
+
+```cmd
+git clone https://github.com/RedtRocks/aohack.git
+cd aohack
+pip install -r requirements.txt
+copy .env.example .env      (then edit .env and paste the real keys)
+python -m agent_engineer list
+python experiments/live_demo.py
+```
+
+The scripted backend needs no key; only the live demo does.
+
+---
+
 ## Results at a Glance
 
 ### Empirical Extraction Lineage (`extraction-gpt5-nano`)
