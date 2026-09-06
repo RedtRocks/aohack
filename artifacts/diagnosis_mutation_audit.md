@@ -28,3 +28,14 @@ This audit analyzes all 12 candidate generations across the three pre-PR 12 live
    Every domain's Generation 4 asserted *"Full retention did not stop the context loss..."*, regardless of whether the domain had tools, multi-turn history, or context degradation.
 3. **Audit Verdict**:
    Out of 12 candidate generations, **7 out of 12 (58.3%)** mutations carried rationales completely detached from the diagnosed failure cause, acting as unguided random search rather than targeted closed-loop optimization.
+
+## Reframing the Pre-Fix Results
+
+All 12 generations audited above were produced **before PR 12**. Every previously reported live number in this project came from this broken ladder.
+
+This fundamentally reframes why previous live runs showed flat or rejected mutations:
+* **The flat results were NOT caused by an overly strict noise gate rejecting real improvements.**
+* **The flat results occurred because the selection gate was functioning correctly—rejecting genuinely unmotivated, random mutations that failed to address the diagnosed root cause.**
+
+Rather than proving the engine incapable of optimization, the pre-PR 12 data proves that the noise-floor gate successfully protected the agent from adopting pseudo-improvements driven by disconnected mutations. With cause-honest ladders landed in PR 12, mutations now directly attack diagnosed failure mechanisms.
+
