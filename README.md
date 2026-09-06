@@ -6,7 +6,7 @@ The system takes a goal, tools, and a scorer, writes an agent spec, runs it, dia
 
 Three replicates per domain give a noise floor, 0.0067 on extraction. We reject any mutation whose gain falls inside it, which rejected 9 of our 10. The one that survived gained 0.0238, three and a half times the floor. The next generation lost 0.0119 and was reverted.
 
-The harness also caught our own system misbehaving. One mutation improved its objective while the reported metric fell. In 7 of 12 mutations, the stated rationale contradicted the trajectory data it claimed to be reading. And one domain scored a flat 0.0000 across all four generations because its tasks defined tools nothing ever consumed.
+The harness also caught our own system misbehaving. One mutation improved its objective while the reported metric fell. In 7 of 12 mutations, the stated rationale contradicted the trajectory data it claimed to be reading. And one domain scored a flat 0.0000 across all four generations because its tasks defined tools nothing ever consumed; with tools wired, the same domain now scores 0.7222 (26 of 36 tasks solved).
 
 Full empirical evidence, noise analysis, and failure traces are documented in [**FINDINGS.md**](FINDINGS.md) and [**LIMITATIONS.md**](LIMITATIONS.md).
 
@@ -27,7 +27,7 @@ The keep-or-revert selection gate measures baseline noise across three independe
 
 | # | Bug / Anomaly Caught | Empirical Measurement | Root Cause & Resolution | Source Artifact |
 | :-: | :--- | :--- | :--- | :--- |
-| **1** | **Silent tool omission** | `api_orchestration` scored 0.0000 binary accuracy across 4 generations. | Runner hardcoded `_NoTools()`; agent completed in 0 steps without tool schemas. Fixed in PR #13. | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md) |
+| **1** | **Silent tool omission** | `api_orchestration` scored 0.0000 binary accuracy across 4 generations. | Runner hardcoded `_NoTools()`; agent completed in 0 steps without tool schemas. Fixed in PR #13; with tools wired, accuracy rose from 0.0000 to 0.7222 (26 of 36 tasks solved). | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md), [`artifacts/api_orchestration_memory_experiment.md`](artifacts/api_orchestration_memory_experiment.md) |
 | **2** | **Objective divergence (Goodhart's Law)** | `extraction` Gen 4 accepted on `mean_score` (+0.0262 > 0.0159 floor), but binary accuracy fell 0.8571 &rarr; 0.8095. | Optimizing continuous partial credit (extracted fields) degraded strict all-or-nothing completion. | [`artifacts/cross_domain_live_comparison.md`](artifacts/cross_domain_live_comparison.md) |
 | **3** | **Contradictory mutation rationales** | 7 of 12 candidate mutations (58.3%) proposed changes whose rationales contradicted trajectory data. | Unconstrained fallback ladder proposed step-budget doublings and retrieval for format errors. Fixed in PR #12. | [`artifacts/diagnosis_mutation_audit.md`](artifacts/diagnosis_mutation_audit.md) |
 
