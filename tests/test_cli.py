@@ -251,6 +251,56 @@ def test_render_saved_lineage_handles_undefined_metrics_without_rendering_zero()
     assert "undefined -> 0.5000" in rendered
     # Ensure it did NOT format undefined as 0.0000
     assert "0.0000 -> 0.5000" not in rendered
+    assert "noise floor: not measured" in rendered
+
+
+def test_render_saved_lineage_noise_floor_presentation() -> None:
+    """Noise floor must render in header, delta must show relative multiplier,
+    sub-noise revert must be labeled explicitly, and missing noise floor must
+    render as 'not measured' (never 0)."""
+    # 1. Extraction artifact with measured noise floor and multiple generations
+    path = Path("artifacts/extraction_gpt5_nano_lineage.json")
+    rendered = render_saved_lineage(path)
+    assert "noise floor (3 replicates): 0.006734" in rendered
+    assert "before -> after         : 0.9279 -> 0.9517  (delta +0.0238, 3.5x the noise floor)" in rendered
+    assert "spec diff: target system_prompt (spec text not stored in artifact - run path stores it going forward)" in rendered
+
+    # 2. Reverted inside noise floor
+    artifact_sub_noise = {
+        "domain": "extraction",
+        "task_count": 14,
+        "noise_floor": {"population_std": 0.01, "replicates": 3},
+        "lineage": [
+            {
+                "generation": 1,
+                "motivating_cause": "output_format_violation",
+                "mutation_kind": "system_prompt_rewrite",
+                "target_path": "system_prompt",
+                "before": 0.90,
+                "after": 0.9062,
+                "delta": 0.0062,
+                "decision": "reverted",
+                "mutation_before": "old prompt text",
+                "mutation_after": "new prompt text",
+            }
+        ],
+    }
+    rendered_sub = render_saved_lineage(artifact_sub_noise)
+    assert "noise floor (3 replicates): 0.010000" in rendered_sub
+    assert "(delta +0.0062, INSIDE the noise floor - rejected as noise)" in rendered_sub
+    assert "spec diff (system_prompt):" in rendered_sub
+    assert "- old prompt text" in rendered_sub
+    assert "+ new prompt text" in rendered_sub
+
+    # 3. Missing/None noise floor renders gracefully as 'not measured', never 0
+    artifact_missing = {
+        "domain": "extraction",
+        "lineage": [],
+    }
+    rendered_missing = render_saved_lineage(artifact_missing)
+    assert "noise floor: not measured" in rendered_missing
+    assert "noise floor: 0" not in rendered_missing
+    assert "noise floor: 0.000000" not in rendered_missing
 
 
 def test_main_supports_direct_domain_invocation(capsys: pytest.CaptureFixture[str]) -> None:

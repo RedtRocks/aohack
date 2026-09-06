@@ -286,6 +286,32 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
     if data.get("root_spec_id") and data.get("final_spec_id"):
         lines.append(f"root spec: {data['root_spec_id']} -> final spec: {data['final_spec_id']}")
 
+    raw_nf = data.get("noise_floor")
+    nf_val: float | None = None
+    reps: int | None = None
+    if isinstance(raw_nf, dict):
+        for k in ("population_std", "reliability_std", "std", "noise_floor", "value"):
+            if k in raw_nf and raw_nf[k] is not None:
+                nf_val = float(raw_nf[k])
+                break
+        reps = raw_nf.get("replicates")
+        if reps is None and "replicate_scores" in raw_nf and isinstance(raw_nf["replicate_scores"], list):
+            reps = len(raw_nf["replicate_scores"])
+        if reps is None and "source" in raw_nf:
+            m = re.search(r"repeats=(\d+)", str(raw_nf["source"]))
+            if m:
+                reps = int(m.group(1))
+        if reps is None and isinstance(data.get("baseline"), dict) and "repeats" in data["baseline"]:
+            reps = data["baseline"]["repeats"]
+    elif isinstance(raw_nf, (int, float)):
+        nf_val = float(raw_nf)
+
+    if nf_val is not None:
+        reps_str = f" ({reps} replicates)" if reps is not None else ""
+        lines.append(f"noise floor{reps_str}: {nf_val:.6f}")
+    else:
+        lines.append("noise floor: not measured")
+
     lineage = data.get("lineage", [])
     for gen in lineage:
         generation = gen.get("generation", 0)
@@ -306,13 +332,25 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
         after_str = _format_scalar(after)
         delta_str = _format_delta(delta)
 
+        delta_info = f"delta {delta_str}"
+        if delta is not None and nf_val is not None and nf_val > 0:
+            is_noise_revert = (
+                gen.get("within_noise_floor") is True
+                or (decision == "REVERTED" and 0 <= delta <= nf_val)
+                or (decision == "REVERTED" and "does not clear" in reason.lower() and "keep threshold" in reason.lower() and delta >= 0)
+            )
+            if is_noise_revert:
+                delta_info = f"delta {delta_str}, INSIDE the noise floor - rejected as noise"
+            elif delta > 0:
+                delta_info = f"delta {delta_str}, {delta / nf_val:.1f}x the noise floor"
+
         lines.append("")
         lines.append(f"--- generation {generation}: {decision} ---")
         lines.append(f"  dominant cause targeted : {cause}")
         lines.append(f"  mutation                : {mutation_label}")
         if rationale:
             lines.append(f"  rationale               : {rationale}")
-        lines.append(f"  before -> after         : {before_str} -> {after_str}  (delta {delta_str})")
+        lines.append(f"  before -> after         : {before_str} -> {after_str}  ({delta_info})")
         if "memory_store_size" in gen:
             lines.append(f"  memory store size       : {gen['memory_store_size']} entries")
         if reason:
@@ -322,6 +360,12 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
         spec_before = gen.get("spec_before")
         spec_after = gen.get("spec_after")
         spec_diff = gen.get("spec_diff")
+        m_before = gen.get("mutation_before") or gen.get("before_text")
+        m_after = gen.get("mutation_after") or gen.get("after_text")
+        if m_before is None and isinstance(gen.get("mutation"), dict):
+            m_before = gen["mutation"].get("before")
+            m_after = gen["mutation"].get("after")
+
         if spec_before is not None and spec_after is not None:
             try:
                 sb = AgentSpec.model_validate(spec_before) if isinstance(spec_before, dict) else spec_before
@@ -337,8 +381,17 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
         elif spec_diff:
             lines.append("  spec diff:")
             lines.extend(f"    {line}" for line in str(spec_diff).rstrip("\n").splitlines())
+        elif m_before is not None or m_after is not None:
+            target_hdr = f" ({target_path})" if target_path else ""
+            lines.append(f"  spec diff{target_hdr}:")
+            if m_before:
+                lines.extend(f"    - {line}" for line in str(m_before).splitlines())
+            if m_after:
+                lines.extend(f"    + {line}" for line in str(m_after).splitlines())
+        elif target_path:
+            lines.append(f"  spec diff: target {target_path} (spec text not stored in artifact - run path stores it going forward)")
         else:
-            lines.append("  spec diff: (spec text not stored in artifact)")
+            lines.append("  spec diff: (spec text not stored in artifact - run path stores it going forward)")
 
     lines.append("")
     lines.append("=== lineage summary ===")
@@ -364,17 +417,13 @@ def render_saved_lineage(data_or_path: dict[str, Any] | str | Path) -> str:
 
     lines.append(f"{accepted_count}/{len(lineage)} generations accepted")
 
-    noise_floor = data.get("noise_floor")
-    if isinstance(noise_floor, dict):
-        std = noise_floor.get("reliability_std")
-        source = noise_floor.get("source", "measured noise floor")
-        if std is not None:
-            lines.append(f"keep threshold: {std:.6f} ({source})")
-    elif isinstance(noise_floor, (int, float)):
-        lines.append(
-            f"keep threshold: {noise_floor:.6f} (measured run-to-run noise floor "
-            "on the root spec, repeats=3 -- not a fixed epsilon)"
+    if nf_val is not None:
+        source = (
+            raw_nf.get("source", "measured run-to-run noise floor on the root spec, repeats=3 -- not a fixed epsilon")
+            if isinstance(raw_nf, dict)
+            else "measured run-to-run noise floor on the root spec, repeats=3 -- not a fixed epsilon"
         )
+        lines.append(f"keep threshold: {nf_val:.6f} ({source})")
 
     if data.get("memory_growth_table"):
         lines.append("")
@@ -398,6 +447,7 @@ def export_lineage_to_dict(
             "source": "measured automatically by agent_engineer.loop.run_loop's own default (Evaluator, repeats=3, on the root spec)",
             "reliability_variance": report.noise_floor**2,
             "reliability_std": report.noise_floor,
+            "replicates": 3,
         }
     return {
         "label": label or f"Lineage run on domain {domain}",
@@ -421,6 +471,9 @@ def export_lineage_to_dict(
                 "delta": record.verdict.delta,
                 "decision": record.verdict.decision.value,
                 "reason": record.verdict.reason,
+                "mutation_before": record.mutation.before,
+                "mutation_after": record.mutation.after,
+                "spec_diff": diff_agent_specs(record.spec_before, record.spec_after),
                 "spec_before": record.spec_before.model_dump(mode="json"),
                 "spec_after": record.spec_after.model_dump(mode="json"),
                 "memory_store_size": record.memory_store_size,
