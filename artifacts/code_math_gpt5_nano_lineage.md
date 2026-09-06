@@ -47,5 +47,10 @@ Rationale behind each proposed mutation:
   - Gen 2 (strategy change): scored 0.6250 (delta -0.1250) -> properly reverted.
   - Gen 3 (step budget increase): scored 0.7500 (delta +0.0000) -> properly reverted under noise threshold.
   - Gen 4 (memory reconfiguration): scored 0.6875 (delta -0.0625) -> properly reverted.
-- **Mutator ladder exhaustion**: For `premature_stop` on a tool-less agent (`tools=()`), `LadderMutator` provides exactly four valid moves (prompt rewrite, strategy escalation, step budget increase, memory reconfiguration). Once all four moves have been proposed and rejected against empirical evaluation, the mutator terminates cleanly (`stop_on_stall=True`).
-- **Headroom vs. Model capability**: Despite 35% theoretical headroom (baseline accuracy 0.6458), generic prompt and architecture mutations were unable to beat the baseline. The final spec correctly reverted to root, preserving baseline reliability and token spend rather than accepting negative or noisy mutations.
+- **Headroom vs. Mutation Vocabulary Limitation**:
+  - `code_math` presents ~35% theoretical headroom (baseline accuracy 0.6458, task-level baseline mean score 0.7500).
+  - All four generations targeted `premature_stop`, and none of the four distinct approaches helped (two made scores worse, one was flat, one degraded into sampling noise).
+  - This suggests either:
+    1. The structural diagnosis rule (`step_count <= max_steps // 2`) misattributes calculation failures as `premature_stop` simply because single-shot calculations finish in 0 tool steps; OR
+    2. The current mutation vocabulary (behavioral prompt guidance, strategy mode changes, step budgets, memory architectures) lacks operators capable of improving raw mathematical/algorithmic precision on fixed model weights.
+  - This is an honest and informative limitation of the current mutation set: on pure computation without tools, structural agent mutations cannot compensate for model reasoning boundaries, and the selection harness correctly refused to adopt any of the degraded mutations.
