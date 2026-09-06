@@ -1,47 +1,74 @@
 # Limitations
 
-Honest accounting of what this build has actually measured, versus what it is
-designed to measure once the pieces currently missing land. Read this before
-citing any number this CLI prints.
+Honest accounting of what this build has actually measured. Read this before
+citing any number this CLI prints, or any chart built from one.
 
-## No real model has run through this yet
+## No live-model run will happen in this environment. Full stop.
 
-Every number in this repo's test suite, and every number the CLI prints by
-default (`--backend scripted`), comes from `agent_engineer.cli.ScriptedBackend`
--- a deterministic stand-in, not a model. It answers a task correctly only if
-that task carries a generic reference answer (`TaskSpec.expected`) and admits
-it based on a fixed hash of the task id and the generation tier, not on any
-actual reasoning. It never reads a prompt, calls a tool, or does anything an
-agent does.
+This is not "not yet" -- there is no reachable API key in this environment,
+and none is coming. **Every number produced by this project, in its test
+suite and in every CLI run, comes from a scripted backend, never from a live
+LLM agent.** `agent_engineer.cli.AnthropicBackend` exists in the source and is
+reachable via `--backend anthropic`, but it has never executed here and will
+not: treat it as documentation of the intended integration point, not as a
+tested code path. Nothing in this repository should be read, presented, or
+charted as evidence that a live model's performance changed, because no live
+model has run.
 
-`agent_engineer.cli.AnthropicBackend` exists and is wired into `--backend
-anthropic`, but it has not been run: this environment has no
-`ANTHROPIC_API_KEY` configured, and nothing below should be read as if a real
-model had exercised this path. Until it does, the following remain unverified
-against a real model:
+**What the scripted runs DO establish, and it is a real result:**
 
+- The five stages -- synthesize, evaluate, diagnose, mutate, select -- integrate
+  correctly through the frozen contracts (`AgentSpec`, `Trajectory`, `Diagnosis`,
+  `Mutation`) against three real domains (`code_math`, `extraction`,
+  `api_orchestration`), not just against a test double built for the engine's
+  own test suite.
+- Before-numbers and deltas propagate correctly end to end: every
+  `GenerationRecord` carries the exact `before`/`after`/`delta` the selection
+  policy decided on, and the CLI's lineage view and results table render
+  those same numbers without recomputing or rounding away the connection
+  between them.
+- Accept/reject/revert behaves correctly across a mixed lineage: this build
+  has been run against a lineage that includes **accepted** generations with
+  varied, non-uniform deltas (`code_math`: +0.125, +0.375, +0.0625 in one run)
+  and **reverted** generations at zero delta (`extraction`,
+  `api_orchestration`, where the scripted backend has no reference answer to
+  give and correctly refuses rather than guesses). The lineage view was
+  designed against this mixed shape from the start -- not against a single
+  run of identical accepts -- and renders REVERTED, zero-delta, and
+  non-monotonic sequences the same way it renders a clean accept: labeled,
+  numbered, and diffed, never hidden or smoothed over.
+
+**What the scripted runs do NOT establish, and no output here should imply
+otherwise:**
+
+- That an LLM agent's performance improved. No LLM agent ran. A scripted
+  backend answering a fixed hash of a task id correctly is not a model getting
+  better at a task; it is a stand-in confirming the plumbing that would carry
+  a model's improvement, if there were one, without inventing the improvement
+  itself.
 - Whether the mutations the ladder proposes (system-prompt rewrites, strategy
-  changes, memory reconfiguration, budget adjustments) actually change a real
-  model's behavior in the direction the rationale claims.
+  changes, memory reconfiguration, budget adjustments) would change a real
+  model's behavior in the direction their rationale claims.
 - Whether the heuristic diagnoser's structural rules (budget exhaustion, tool
   misuse, repeated calls, premature stop) correctly attribute a *real* agent's
   failures, as opposed to a scripted backend's engineered ones.
-- Whether the four measured metrics (accuracy, reliability, cost, speed) look
+- Whether the four measured metrics (accuracy, reliability, cost, speed) behave
   the way this document assumes once latency and token variance are real
   instead of fixed per call.
 
-**What has been measured**, and is safe to cite: the *engine's own control
-flow* -- synthesize, evaluate, diagnose, mutate, select, repeat -- runs
-correctly against three real domains (`code_math`, `extraction`,
-`api_orchestration`), and the CLI built on top of it streams a legible lineage
-and an honest results table for whatever the scripted backend produces on each
-one. `code_math` shows repeated **accepted** generations with varied,
-non-uniform deltas (+0.125, +0.375, +0.0625 in one run) because most of its
-tasks carry a reference answer the scripted backend can hit. `extraction` and
-`api_orchestration` show **reverted** generations at zero delta, because most
-of their tasks either have no single reference answer or need free-form
-prose/tool chains this backend does not attempt -- which is the honest result
-of a backend that refuses rather than guesses, not a defect in the CLI.
+If a chart or table produced by this CLI is shown to anyone, the honest
+caption is "the lineage machinery accepts, rejects, and reverts correctly
+end to end on a scripted backend" -- not "the agent got better."
+
+A second scripted-backend suite, built separately to specifically exercise
+rejected mutations, negative deltas, and a delta smaller than run-to-run
+variance (which must not be accepted), is expected to land in this repo. The
+CLI's rendering was already built and tested against a mixed shape --
+accepted, reverted, positive, and zero delta together -- rather than against
+a single clean climb, precisely so that handoff needs no rework here beyond
+pointing the CLI at whichever backend produces it. This section is the one
+place in the repo that speaks to the no-live-model limitation; a second,
+competing writeup of the same fact should not exist alongside it.
 
 ## The "domain-agnostic" claim, and what it rests on
 
