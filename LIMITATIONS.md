@@ -195,3 +195,16 @@ reliability metric is trivially `0.0000` (identical pass/fail every repeat),
 never a real measure of a real model's run-to-run variance. That number is
 real, and it is undefined-safe, but on `--backend scripted` runs it is not
 informative until a real backend is behind it.
+
+## Episodic memory: measured token tax on single-turn tasks
+
+The harness implements an `EpisodicMemoryStore` (`agent_engineer/memory.py`) that accumulates typed reflections across runs and injects retrieved past experiences into prompt contexts.
+
+In benchmark evaluations on `code_math` (`artifacts/episodic_memory_growth_demo.md`):
+- Memory entries accumulated steadily across iterations: **0 &rarr; 29 entries**.
+- Prompt overhead increased from 41.9 to 71.5 tokens per task (**+29.6 tokens/task**, a +70.6% prompt cost increase).
+- Tool calls saved: **zero**. Single-turn tasks finish in a single completion and contain no multi-step exploratory tool calls to eliminate.
+- Cost per solved task dropped (223.3 &rarr; 95.3 tokens) strictly because spec-level mutations increased task pass rates, amortizing fixed costs across successes, not because memory improved execution efficiency.
+
+**Architectural limitation**: Episodic memory is an uncompensated token tax on single-turn workflows. Memory retrieval only delivers an autonomous efficiency benefit when it can prune redundant multi-hop exploratory steps (such as caching discovered endpoints or authentication sequences). Without multi-step execution tools, memory retrieval increases token spend without improving accuracy.
+

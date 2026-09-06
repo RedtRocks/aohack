@@ -1,6 +1,12 @@
 # agent-engineer
 
-Most self-improving agent demos show a line going up. We measured how much of that line is noise. Three replicates per domain give a noise floor — 0.0067 on extraction — and we reject any mutation whose gain falls inside it, which rejected 9 of our 10. The one that survived gained +0.0238, three and a half times the floor, and the next generation lost 0.0119 and was reverted. Along the way the harness caught four things in our own system: a domain scoring 0.0000 because the agent was never handed tools, a mutation that improved its objective while the reported metric fell, 7 of 12 mutations whose stated rationale contradicted their own trajectory data, and memory that costs 29.6 tokens a task and saves nothing on single-turn work. The system takes a goal, tools, and a scorer, writes an agent spec, runs it, diagnoses only the failures, and makes one change aimed at the dominant cause. Four domains, and the engine never imports any of them.
+Most self-improving agent demos show a line going up. We measured how much of that line is noise.
+
+The system takes a goal, tools, and a scorer, writes an agent spec, runs it, diagnoses only the failures, and makes one change aimed at the dominant cause. Four domains, and the engine never imports any of them.
+
+Three replicates per domain give a noise floor, 0.0067 on extraction. We reject any mutation whose gain falls inside it, which rejected 9 of our 10. The one that survived gained 0.0238, three and a half times the floor. The next generation lost 0.0119 and was reverted.
+
+The harness also caught our own system misbehaving. One mutation improved its objective while the reported metric fell. In 7 of 12 mutations, the stated rationale contradicted the trajectory data it claimed to be reading. And one domain scored a flat 0.0000 across all four generations because its tasks defined tools nothing ever consumed.
 
 Full empirical evidence, noise analysis, and failure traces are documented in [**FINDINGS.md**](FINDINGS.md) and [**LIMITATIONS.md**](LIMITATIONS.md).
 
@@ -17,14 +23,25 @@ The keep-or-revert selection gate measures baseline noise across three independe
 | 1 | `output_format_violation` | `system_prompt_rewrite` | 0.9279 | 0.9517 | **+0.0238** | **accepted** | 0.0067 |
 | 2 | `output_format_violation` | `strategy_changed` | 0.9517 | 0.9398 | -0.0119 | **reverted** | 0.0067 |
 
-### Four System Bugs Caught by the Harness
+### System Anomalies Caught by the Harness
 
-| # | Bug / Failure Mode Caught | Empirical Measurement | Root Cause & Resolution | Source Artifact |
+| # | Bug / Anomaly Caught | Empirical Measurement | Root Cause & Resolution | Source Artifact |
 | :-: | :--- | :--- | :--- | :--- |
-| **1** | **Silent tool omission** | `api_orchestration` scored 0.0000 binary accuracy with lowest token cost (234.7 tok/run vs 352.8–613.0). | Runner hardcoded `_NoTools()`; agent completed in 0 steps without tool schemas. Fixed in PR #13. | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md) |
+| **1** | **Silent tool omission** | `api_orchestration` scored 0.0000 binary accuracy across 4 generations. | Runner hardcoded `_NoTools()`; agent completed in 0 steps without tool schemas. Fixed in PR #13. | [`artifacts/api_orchestration_gpt5_nano_lineage.md`](artifacts/api_orchestration_gpt5_nano_lineage.md) |
 | **2** | **Objective divergence (Goodhart's Law)** | `extraction` Gen 4 accepted on `mean_score` (+0.0262 > 0.0159 floor), but binary accuracy fell 0.8571 &rarr; 0.8095. | Optimizing continuous partial credit (extracted fields) degraded strict all-or-nothing completion. | [`artifacts/cross_domain_live_comparison.md`](artifacts/cross_domain_live_comparison.md) |
 | **3** | **Contradictory mutation rationales** | 7 of 12 candidate mutations (58.3%) proposed changes whose rationales contradicted trajectory data. | Unconstrained fallback ladder proposed step-budget doublings and retrieval for format errors. Fixed in PR #12. | [`artifacts/diagnosis_mutation_audit.md`](artifacts/diagnosis_mutation_audit.md) |
-| **4** | **Memory token tax on single-turn tasks** | Episodic memory grew 0 &rarr; 29 entries, adding +29.6 tokens/task (+70.6% prompt overhead) with 0 tool calls saved. | Single-turn tasks have no multi-hop exploratory steps to prune; memory is pure overhead without tools. | [`artifacts/episodic_memory_growth_demo.md`](artifacts/episodic_memory_growth_demo.md) |
+
+---
+
+## Frequently Asked Questions
+
+### Is your selection gate too strict rather than your improver too weak?
+
+No. The accept-then-revert pair in the extraction lineage demonstrates that the gate discriminates rather than simply refusing changes:
+- In **Generation 1**, the gate accepted a genuine gain (**+0.0238**, 3.5&times; the 0.0067 noise floor).
+- In **Generation 2**, the next mutation caused a performance decline (**-0.0119**), and the gate reverted to the parent spec.
+
+If the gate were indiscriminately strict, Generation 1 would have been blocked. If the gate lacked sensitivity, Generation 2 would have been retained. The gate admits clear signal above the measured noise floor while reverting both sub-threshold fluctuations and genuine regressions.
 
 ---
 
